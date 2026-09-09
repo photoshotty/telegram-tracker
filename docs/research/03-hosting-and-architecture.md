@@ -1,0 +1,306 @@
+# hosting
+
+## Summary
+GitHub Actions + Vercel is feasible for a 5-minute poller but with three hard caveats verified against 2026 docs/community threads: (1) `schedule` min interval is 5 min, runs only on the default branch, is best-effort with no SLA, and 2025-2026 community reports (incl. a GitHub staff reply in discussion #196910) show drift routinely 15 min to several hours and occasional dropped runs; the reliable workaround is an external free cron (cron-job.org, per-minute, custom headers) calling the `workflow_dispatch` REST endpoint, which community reports say starts near-instantly. (2) Minutes: at 288 runs/day a private repo burns roughly 8,600-8,900 min/month (jobs bill per job; assume rounding up to a whole minute) against the 2,000-minute Free quota, so the workflow must live in a PUBLIC repo (standard runners free/unlimited there); the data itself can be pushed to a separate private repo via PAT if privacy matters (minutes are charged to the repo where the workflow runs). Public-repo scheduled workflows are auto-disabled after 60 days without repository activity; only commits count (tags/releases do not), and the existence of keep-alive actions that simply commit a marker file from the workflow indicates workflow-made commits reset the timer (not officially documented). (3) Vercel Hobby cannot poll: Hobby cron = once per day with +/-59 min precision; Pro ($20/user/mo) = per-minute crons with 300 s default / 800 s max function duration. No persistent outbound MTProto socket on Vercel (functions are duration-bounded; the 2026 WebSocket beta is inbound-only and still an invocation), so realtime `updateUserStatus` needs a VPS/home machine.
+
+Storage: ~300 tiny rows/day (~100k rows/yr, single-digit MB/yr) is 100x below every free tier examined (Turso 5 GB/10M writes/mo, Neon 0.5 GB/100 CU-h, Supabase 500 MB but pauses after 1 week idle, Cloudflare D1 100k writes/day, Upstash Redis 500k cmds/mo, Vercel Blob free on Hobby). The simplest is JSONL in the repo: monthly files stay far under the 1 MB Contents-API JSON limit for years; raw.githubusercontent.com is CDN-cached ~5 min (max-age=300) and unauthenticated rate limits were tightened in May 2025, so the dashboard should use ISR (revalidate >= 300 s) or the authenticated Contents API (5,000 req/h). Fully static rebuild-per-commit is NOT viable at a 5-min cadence because Hobby allows 100 deployments/day and deploy hooks 60 triggers/hour; rebuild hourly or use ISR instead.
+
+Persistent-listener alternatives, cheapest always-on first: Koyeb eco-nano ~$1.61/mo (0.1 vCPU/256 MB; the free instance sleeps after 1 h idle), Fly.io shared-cpu-1x 256 MB ~$1.94-2.02/mo (no free tier; trial is 2 VM-hours/7 days), Hetzner CX23 ~EUR 3.99 + EUR 0.50 IPv4 = EUR 4.49/mo (2 vCPU/4 GB), Railway Hobby $5/mo incl. $5 credit (Free plan's $1 credit cannot run a 24/7 worker), GCP e2-micro free (1 instance-month in us-west1/us-central1/us-east1, 30 GB disk, needs billing account), Oracle Always Free (2x AMD micro 1/8 OCPU/1 GB, Arm A1 cut to 2 OCPU/12 GB in mid-2026, frequent out-of-capacity, and an idle-reclaim rule that a near-zero-CPU listener would trip: CPU<20% and network<20% for 7 days). Render's free tier has no background workers and web services sleep after 15 min. Cloudflare Workers/Durable Objects can open outbound TCP and use alarms, but a socket keeps a DO alive at most 15 min, sockets cannot persist across invocations, and neither mtcute (issue #54 still open, no Workers package) nor MTKruto (no Workers listed) officially supports Workers; Deno Deploy stops idle apps after 5 s-10 min and SIGKILLs 5 s after SIGINT. Realtime on serverless is therefore high-effort/experimental; a $2-5/mo VM or a home PC is the practical route.
+
+## Findings
+- [high] GitHub Actions `schedule`: shortest interval is once every 5 minutes; runs only from the workflow file on the default branch; can be delayed during high load (start of every hour is called out) and 'some queued jobs may be dropped'; in a PUBLIC repository scheduled workflows are auto-disabled after 60 days without repository activity (the doc does not define 'activity').
+  - notes: Doc explicitly scopes the 60-day rule to public repos.
+  - src: https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
+- [medium] Real-world schedule drift in 2025-2026 is far worse than 'a few minutes': community threads report 20-30 min (Apr 2025), 45 min-2 h (mid-2026), 3-10+ h and fully missed runs (Aug-Sep 2026); one 15-minute schedule ran every ~90 min; GitHub staff (nebuk89) attributed it to load balancing and said scheduled drops grew >30% in ~2 months. Users recommend triggering workflow_dispatch from an external scheduler, which reportedly starts near-instantly.
+  - notes: Community-reported, not an SLA statement; magnitude varies by day/time. Treat effective polling interval on pure `schedule` as unpredictable.
+  - src: https://github.com/orgs/community/discussions/196910
+  - src: https://github.com/orgs/community/discussions/156282
+- [high] cron-job.org is free, supports per-minute execution and custom HTTP method/headers/body, so it can POST to GitHub's workflow_dispatch API with an Authorization header to trigger the poller punctually.
+  - notes: Needs a fine-grained PAT with actions:write stored at cron-job.org; alternative external schedulers work the same way.
+  - src: https://cron-job.org/en/
+- [medium] Only new commits count as 'repository activity' for the 60-day rule (tags/releases do not, per user reports); whether commits authored via GITHUB_TOKEN reset the timer is not officially documented, but widely used keep-alive actions rely on exactly that (committing a marker file from the workflow), implying it works.
+  - notes: Discussion #57858 has no GitHub staff answer. Practical mitigation: the poller itself commits data, so the repo is never idle; add a keepalive step as belt-and-braces.
+  - src: https://github.com/orgs/community/discussions/57858
+  - src: https://github.com/stefanzweifel/git-auto-commit-action
+- [high] Standard GitHub-hosted runners are free for public repositories; private repos get 2,000 min/month on Free (3,000 Pro); Linux 2-core overage $0.006/min. Job limit 6 h on hosted runners; workflow run limit 35 days; GITHUB_TOKEN REST limit 1,000 req/h per repo; unauthenticated 60 req/h; PAT 5,000 req/h.
+  - notes: Monthly minutes estimate for */5 polling: 288 jobs/day; each job ~30-60 s wall time (checkout + setup + pip/npm from cache + one MTProto call + commit). GitHub bills per job and (per long-standing practice, not re-verified on this page) rounds each job up to a whole minute, so budget 288 min/day = ~8,640 (30-day) to ~8,928 (31-day) min/month. That exhausts a private repo's 2,000 Free minutes in ~7 days; only a public repo is free. Cost if private on overage: ~$40-45/month.
+  - src: https://docs.github.com/en/billing/managing-billing-for-your-products/about-billing-for-github-actions
+  - src: https://docs.github.com/en/actions/reference/limits
+  - src: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
+- [high] Commits pushed with GITHUB_TOKEN do not trigger other workflows (anti-recursion), EXCEPT workflow_dispatch and repository_dispatch, which always create runs. So a job could re-dispatch itself, but GitHub's Actions terms prohibit using hosted runners for 'any other activity unrelated to the production, testing, deployment, or publication of the software project' and as a 'serverless application component'; violations can lead to job termination, restrictions, or account suspension.
+  - notes: A chained 6-hour 'persistent listener' on Actions is technically possible (dispatch next run before the 6 h limit) but has gaps at each handover (queue delay now minutes-hours), overlap risk, and is a terms-of-service risk. Not recommended. A short 5-minute poll that commits data to the same repo is a much more defensible 'publication of the project's data' use, but is still grey.
+  - src: https://docs.github.com/en/actions/concepts/security/github_token
+  - src: https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features
+- [high] GitHub-hosted Linux/Windows runners are Azure VMs; runner egress IP ranges are published by GET /meta in the `actions` array and must be queried live because they change.
+  - notes: Implication: the MTProto session string will connect from a different Azure datacenter IP on nearly every run. Whether Telegram tolerates a single auth_key used from rotating datacenter IPs long-term is an open question for the Telegram-API researcher.
+  - src: https://docs.github.com/en/actions/concepts/runners/github-hosted-runners
+  - src: https://docs.github.com/en/rest/meta/meta?apiVersion=2022-11-28
+- [high] Contents API: 'Get repository content' returns JSON with content for files <=1 MB; 1-100 MB only via raw/object media type; >100 MB unsupported. 'Create or update file contents' needs the current blob `sha`, creates a commit, and must not be called concurrently with delete.
+  - notes: Design consequence: shard data into monthly JSONL files (e.g. data/2026-09.jsonl). At <=300 rows/day x ~60 bytes, a month is ~0.5 MB max, a year ~6 MB across 12 files, so both raw and Contents-API JSON reads stay comfortable for years. Write-on-change (append only when status or was_online changed) cuts rows to ~30-100/day.
+  - src: https://docs.github.com/en/rest/repos/contents?apiVersion=2022-11-28
+- [medium] raw.githubusercontent.com serves with Cache-Control max-age=300 (5-minute CDN staleness after a push) and is covered by GitHub's May 2025 tightening of unauthenticated rate limits; GitHub recommends authenticating.
+  - notes: The exact new unauthenticated numbers were not stated in the changelog. The 300 s max-age figure comes from community reports surfaced in search, not from a doc page I opened. Practical rule: never fetch raw per page view; use Next.js ISR with revalidate >= 300 or the Contents API with a token (5,000 req/h).
+  - src: https://github.blog/changelog/2025-05-08-updated-rate-limits-for-unauthenticated-requests/
+- [high] Vercel Cron Jobs (docs last updated 2026-07-15): Hobby = 100 crons/project but minimum interval ONCE PER DAY with per-hour precision (+/-59 min), expressions more frequent than daily fail deployment; Pro/Enterprise = once per minute, per-minute precision. Crons are ordinary function invocations for billing.
+  - notes: Rules out Vercel Hobby as the poller. Pro is $20/user/month.
+  - src: https://vercel.com/docs/cron-jobs/usage-and-pricing
+- [high] Vercel Functions (Fluid compute) max duration: Hobby 300 s default and maximum; Pro/Enterprise 300 s default, 800 s max, 1,800 s extended beta (per-function config). Memory: Hobby 2 GB/1 vCPU max. Vercel points to 'Workflows' for unlimited execution time. Pre-April-2025 non-Fluid projects: Hobby 10 s default / 60 s max.
+  - notes: A persistent MTProto TCP connection cannot outlive an invocation; therefore no realtime listener on Vercel. A Pro cron-per-minute poller (each invocation ~1-3 s) is feasible: ~43k invocations/month, negligible CPU.
+  - src: https://vercel.com/docs/functions/configuring-functions/duration
+  - src: https://vercel.com/docs/functions/limitations
+  - src: https://vercel.com/docs/limits
+- [medium] Vercel WebSocket support (public beta, 2026) lets Functions SERVE inbound WebSocket connections under the same Function limits/pricing (Active CPU billing while processing messages). It does not create a long-lived outbound worker model.
+  - notes: The changelog did not state the duration bound explicitly; Functions limits page implies max duration still applies.
+  - src: https://vercel.com/changelog/websocket-support-is-now-in-public-beta
+- [high] Vercel Hobby: free, non-commercial/personal use only; included per month: 1M function invocations, 4 CPU-hrs Active CPU, 360 GB-hrs provisioned memory, 100 GB Fast Data Transfer, up to 1M Edge Requests; 100 deployments/day; 1 hour of runtime logs; Blob storage available; exceeding a limit pauses that feature for 30 days rather than billing.
+  - notes: Personal stats dashboard fits Hobby. The 100 deployments/day cap is what kills 'rebuild on every 5-min data commit' (288/day).
+  - src: https://vercel.com/docs/plans/hobby
+  - src: https://vercel.com/docs/limits
+- [high] Vercel Deploy Hooks: GET/POST to a project/branch-specific URL triggers a build (no auth header; the URL is the secret); limits: 5 hooks/project on Hobby/Pro, 60 triggers/hour/project; repeated triggers for the same version cancel earlier builds; build cache used by default.
+  - notes: Usable for an hourly or on-change static rebuild from the Action (e.g., only when the day's aggregate changed), not per poll.
+  - src: https://vercel.com/docs/deploy-hooks
+- [medium] Vercel Blob: free on Hobby within limits (no overage billing; access blocked for 30 days if exceeded); Hobby rate limits 1,200 simple ops/min and 900 advanced ops/min; put()/list() are 'advanced operations' (pricing example implies ~10K advanced ops and ~100K simple ops and 5 GB included before overage); del() free; max file 5 TB.
+  - notes: The included quantities in the example appear to be Pro numbers; Hobby's exact included ops were not explicitly tabulated on the page. At 288 put()/day (~8.6k/month) a 10K advanced-ops allowance would be nearly consumed; write-on-change or one blob per day avoids this. Blob is a worse fit than JSONL-in-repo or a DB because you cannot append; each write re-uploads the file.
+  - src: https://vercel.com/docs/vercel-blob/usage-and-pricing
+- [high] Neon Free: 100 projects, 0.5 GB storage/project, 100 CU-hours/project/month (~400 h of a 0.25 CU compute), 10 branches, autosuspend after 5 min (cannot be disabled on Free); Launch plan pay-as-you-go $0.106/CU-hour, $0.35/GB-month, no minimum.
+  - notes: Fits easily; expect ~0.5-1 s cold start on first query after idle for both the Action writer and the dashboard.
+  - src: https://neon.com/docs/introduction/plans
+- [high] Supabase Free: 500 MB DB, 2 active free projects, 5 GB egress, projects PAUSED after 1 week of inactivity; Pro $25/month.
+  - notes: A 5-min writer keeps it active, but if the collector dies for a week the project pauses and must be manually restored — a footgun for a personal tracker.
+  - src: https://supabase.com/pricing
+- [high] Turso Free: 100 databases, 5 GB storage, 500M row reads and 10M row writes per month; Developer plan $4.99/month.
+  - notes: Best DB fit: libSQL over HTTP works from a GitHub Action (Python or JS client) and from Vercel functions without connection pooling concerns; SQLite semantics make local dev trivial.
+  - src: https://turso.tech/pricing
+- [high] Cloudflare D1 on Workers Free: 5M rows read/day, 100k rows written/day, 5 GB storage; Workers Paid $5/month with 25B reads / 50M writes included.
+  - notes: Needs a Worker (or the Cloudflare D1 REST API with an API token) as the write/read path; more moving parts than Turso for the same benefit.
+  - src: https://developers.cloudflare.com/d1/platform/pricing/
+- [high] Upstash Redis Free: 500K commands/month, 256 MB, 10 GB bandwidth, 1 free database; pay-as-you-go $0.2 per 100K commands.
+  - notes: Fine for a sorted-set of (timestamp,status) events (~9k writes/month), but Redis is awkward for multi-year range aggregation compared with SQL/JSONL.
+  - src: https://upstash.com/pricing/redis
+- [high] Next.js ISR: `export const revalidate = N` or `fetch(url, { next: { revalidate: N } })` serves the cached page and regenerates in the background after N seconds; on-demand `revalidatePath`/`revalidateTag` from a Route Handler; lowest fetch revalidate on a route wins; `revalidate: 0`/`no-store` makes the route dynamic; ISR not supported with `output: 'export'`; Next.js recommends high revalidate times and on-demand revalidation for precision.
+  - notes: Recommended dashboard read path: Server Component fetches the monthly JSONL from GitHub with revalidate: 300 (matching raw's 5-min CDN cache), or the Action POSTs to a /api/revalidate route (secret in header) after each commit for immediate freshness — that costs one tiny function invocation per poll (~8.6k/month, far inside Hobby's 1M).
+  - src: https://nextjs.org/docs/app/guides/incremental-static-regeneration
+- [high] Oracle Cloud Always Free: up to 2x VM.Standard.E2.1.Micro (1/8 OCPU, 1 GB RAM, 50 Mbps) plus Arm A1 flex now totaling 2 OCPU / 12 GB (1,500 OCPU-h + 9,000 GB-h per month), 200 GB block storage. Idle Always Free instances are reclaimed if, over 7 days, CPU (95th pct) <20% AND network <20% (AND memory <20% for A1 only). The A1 allowance was silently halved from 4 OCPU/24 GB in mid-2026 (InfoQ: effective June 15, 2026; other reports cite August 18, 2026 enforcement), with no public announcement; PAYG accounts may keep the old limits per support emails. Arm capacity is frequently 'Out of host capacity' in popular regions.
+  - notes: A tiny MTProto listener sits at ~0% CPU and ~0 network, i.e., squarely inside the reclaim criteria on an Always Free tenancy. Mitigations people use: upgrade tenancy to PAYG (still $0 within free limits and, per community, exempt from idle reclaim — low confidence), or run a periodic CPU burner (silly). The AMD micro is the realistic option; A1 provisioning is unreliable.
+  - src: https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm
+  - src: https://www.infoq.com/news/2026/07/oracle-cloud-free-tier-limits/
+- [high] Google Cloud free tier: 1 non-preemptible e2-micro instance-month per month (hours pooled across instances) in us-west1, us-central1 or us-east1; 30 GB-months standard persistent disk; 1 GB/month North America egress; GPUs never free.
+  - notes: Requires a billing account with a card; small non-free line items (e.g., external IPv4 address pricing changes since 2024) may produce cents-to-a-couple-dollars per month — not verified on this page. Reliability is excellent; e2-micro (2 shared vCPU bursting, 1 GB) is plenty for Telethon/GramJS.
+  - src: https://docs.cloud.google.com/free/docs/free-cloud-features
+- [high] Fly.io: no ongoing free tier in 2026; the trial is 2 total VM-hours or 7 days, whichever first, and adding a card ends the trial and starts billing; shared-cpu-1x 256 MB machine is ~$1.94/month (Ashburn) to ~$2.02/month (Amsterdam), usage-billed with no minimum plan.
+  - notes: Cheap and simple (fly launch with a Dockerfile); add ~$0.15/GB-month if you want a volume for a local SQLite instead of an external DB.
+  - src: https://fly.io/docs/about/pricing/
+  - src: https://fly.io/docs/about/free-trial/
+- [high] Railway: Free plan $0 with $1/month usage credit (1 vCPU/0.5 GB cap, 1 replica); Trial $5 one-time credit for 30 days; Hobby $5/month including $5 usage credit; resource rates ~$20/vCPU-month and ~$10/GB-month RAM, volumes ~$0.15/GB-month, egress $0.05/GB.
+  - notes: A 24/7 worker at 0.25 GB RAM and ~0.05 vCPU costs ~$3.5/month, so the Free plan's $1 credit cannot sustain it; Hobby ($5) covers it within the included credit. Railway runs long-lived processes (any service without a public port is a worker).
+  - src: https://railway.com/pricing
+- [high] Render Free tier: Free web services spin down after 15 minutes without inbound traffic (~1 min to wake); 750 free instance-hours per workspace per month; Background Workers and Cron Jobs are NOT available on Free (only Static Sites, Web Services, Postgres, Key Value); free Postgres expires after 30 days; ephemeral filesystem.
+  - notes: Keeping a listener alive as a 'free web service' requires an external pinger every <15 min and still consumes ~744 of the 750 monthly hours; fragile. Paid workers start around $7/month (not verified on this page).
+  - src: https://render.com/docs/free
+- [high] Koyeb: one Free instance per organization (0.1 vCPU, 512 MB, 2 GB SSD) that scales to zero after 1 hour without traffic; cheapest paid eco-nano is $0.0022/h (~$1.61/month) for 0.1 vCPU / 256 MB / 2 GB SSD.
+  - notes: Eco-nano is the cheapest always-on container found. 256 MB is enough for a Telethon or GramJS listener (typically 60-120 MB RSS).
+  - src: https://www.koyeb.com/docs/reference/instances
+- [medium] Hetzner Cloud: CX22 launched June 2024 at EUR 3.79/month (2 vCPU/4 GB/40 GB, 20 TB traffic, IPv4 included at the time); after the April 2026 price change the entry plan is CX23 at EUR 3.99/month + EUR 0.50 IPv4 = EUR 4.49/month (2 vCPU/4 GB/40 GB), CAX11 Arm at EUR 4.49 + 0.50, CPX22 EUR 7.99.
+  - notes: Hetzner's own pricing page could not be parsed (JS-rendered); 2026 figures are from a third-party article and should be confirmed at hetzner.com/cloud before purchase. IPv6-only (skip the IPv4 add-on) works fine for connecting to Telegram DCs that have IPv6.
+  - src: https://www.hetzner.com/pressroom/new-cx-plans/
+  - src: https://www.bitdoze.com/hetzner-cloud-cost-optimized-plans/
+- [high] Cloudflare Workers TCP sockets: outbound `connect()` from cloudflare:sockets in fetch/scheduled/queue/alarm handlers only (not global scope); sockets cannot persist across requests; in Durable Objects an open outbound socket keeps the object in memory (and billed) for up to 15 minutes; Cloudflare IPs, port 25, private ranges blocked; inbound TCP 'coming soon'.
+  - notes: DO lifecycle: idle DO hibernates after ~10 s or is evicted after 70-140 s unless an in-flight request/outbound connection keeps it alive; an alarm is an incoming event that reconstructs an evicted object. So a 'persistent' MTProto listener would have to reconnect every <=15 min via an alarm loop — doable in principle, but every reconnect risks missing status updates and requires MTProto session state persisted in DO SQLite storage.
+  - src: https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/
+  - src: https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/
+- [high] Durable Objects: SQLite-backed DOs are available on Workers Free (100k requests/day, 13,000 GB-s duration/day, 5 GB storage); Paid $5/month includes 1M requests and 400,000 GB-s/month, then $0.15/M requests and $12.50/M GB-s; alarms are at-least-once with exponential-backoff retries (up to 6 attempts), one alarm per object, ms-precision timestamps; alarm handler wall time up to 15 min; DO CPU limit 30 s default, configurable to 5 min. Workers Free HTTP CPU limit is 10 ms; Cron Triggers: 5 per account Free / 250 Paid, per-minute granularity, 10 ms CPU on Free.
+  - notes: Cost sanity: a DO kept alive 24/7 at 128 MB = ~11,000 GB-s/day, i.e., just under the Free plan's 13,000 GB-s/day and ~330k GB-s/month within Paid's 400k. Cheap, but the software side (below) is the blocker.
+  - src: https://developers.cloudflare.com/durable-objects/platform/pricing/
+  - src: https://developers.cloudflare.com/durable-objects/api/alarms/
+  - src: https://developers.cloudflare.com/durable-objects/platform/limits/
+  - src: https://developers.cloudflare.com/workers/platform/limits/
+  - src: https://developers.cloudflare.com/workers/configuration/cron-triggers/
+- [high] No MTProto client library officially targets Cloudflare Workers: mtcute's README lists Node (@mtcute/node), Bun, Deno (jsr:@mtcute/deno) and Web (@mtcute/web) only, and issue #54 'Add support for cloudflare workers environment' (opened May 2024) is still open with only community snippets for storage/transport; MTKruto lists Deno, Node, Bun, browsers and Web Workers, mentions Deno Deploy in its FAQ, and does not list Cloudflare Workers.
+  - notes: @mtcute/core is platform-agnostic so a custom transport over cloudflare:sockets plus a DO-storage adapter is possible, but that is a research project, not a weekend build. JSR page for @mtcute/core returned 403 so its 'works with Cloudflare Workers' badge (seen only in search snippets) could not be verified.
+  - src: https://github.com/mtcute/mtcute
+  - src: https://github.com/mtcute/mtcute/issues/54
+  - src: https://mtkru.to/
+- [high] Deno Deploy (new) supports Cron, 1M requests and 10 CPU-hours/month on Free, 1 GiB KV; but apps are serverless — started on request, stopped after 5 s to 10 min without traffic, given SIGINT then SIGKILL after 5 s — so long-lived connections must expect eviction and reconnect.
+  - notes: Deno Deploy cron could host a per-minute poller (MTKruto is Deno-first), but it cannot host a persistent listener. Minimum Deno.cron interval on Deploy was not verified.
+  - src: https://deno.com/deploy/pricing
+  - src: https://docs.deno.com/deploy/
+  - src: https://docs.deno.com/deploy/reference/runtime/
+- [high] Data-quality model for polling with exact was_online: every session END is recovered exactly regardless of poll interval T (the next poll reports the new was_online), but a session START is only known to lie in (t_prev_poll, min(t_first_online_poll, end)] — error uniform on [0, T] (mean T/2) if you use the poll time, or +/-T/2 (mean 0) if you use the interval midpoint; multiple sessions that start and end inside one interval collapse into one (only the last was_online survives), so session COUNT is undercounted and their online minutes are undercounted by the earlier sessions' durations.
+  - notes: Derived analysis; premise (exact was_online with 'Everybody' privacy) supplied by the task. Numbers: with T=5 min nominal, per-session start error <=5 min; for ~20-40 mobile sessions/day using midpoint estimates the daily total's error std is roughly sqrt(N)*1.44 min ~ 6-9 min/day (unbiased), plus a systematic undercount of sessions shorter than ~T that fall entirely between polls. But with GitHub Actions' real 2026 drift (T effectively 10 min to hours at times, irregular), start-time error and collapsed sessions grow proportionally and the sampling becomes irregular; using cron-job.org -> workflow_dispatch restores a near-regular 5-min grid. With T=1 min on a VPS: start error <=1 min, only sub-minute sessions collapse, daily minutes accurate to ~1-3 min. Realtime updateUserStatus on a persistent session: both edges exact (subject to Telegram's own online/offline semantics, e.g., the ~5-min 'online' expiry the other researchers cover), all sessions counted; only gaps are your listener's downtime, which a 1-min heartbeat poll on reconnect can backfill for the end edge.
+  - src: https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
+  - src: https://github.com/orgs/community/discussions/196910
+
+## Candidates
+- **GitHub Actions scheduled poller (public repo)** (ci-scheduler) https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
+  - approach: `on: schedule` cron */5 (optionally plus external cron-job.org -> workflow_dispatch for punctuality); job checks out repo, runs Telethon/GramJS with a StringSession secret, appends a JSONL row, commits with GITHUB_TOKEN (permissions: contents: write).
+  - fit: partial: works and is $0 only in a PUBLIC repo (~8.6-8.9k min/month exceeds private 2,000-min Free quota); 5-min floor; heavy, unpredictable schedule drift in 2026 unless externally dispatched; 60-day auto-disable mitigated by the data commits themselves; grey area under Actions terms; rotating Azure runner IPs.
+  - language_or_stack: YAML + Python (Telethon) or Node (GramJS)
+  - maintained: GitHub product, current
+  - popularity: n/a
+  - notes: 6 h job max; workflow_dispatch via GITHUB_TOKEN does create runs so self-chaining is possible but not advisable. Commit history grows by ~8.6k tiny commits/month; consider write-on-change and yearly squash, or push data to a separate private repo with a PAT (minutes still free because the workflow runs in the public repo).
+- **cron-job.org external scheduler** (saas) https://cron-job.org/en/
+  - approach: Free per-minute HTTP cron with custom headers/body; POST https://api.github.com/repos/{owner}/{repo}/actions/workflows/{id}/dispatches with a PAT.
+  - fit: yes as a mitigation for GitHub schedule drift (community reports near-instant workflow_dispatch starts)
+  - language_or_stack: n/a
+  - maintained: active, donation-funded
+  - popularity: widely used
+  - notes: Store a least-privilege fine-grained PAT (Actions: write on one repo).
+- **Vercel Cron Jobs (Hobby)** (saas) https://vercel.com/docs/cron-jobs/usage-and-pricing
+  - approach: vercel.json crons invoke a Next.js route handler.
+  - fit: no: once per day minimum with +/-59 min precision on Hobby
+  - language_or_stack: Next.js
+  - maintained: current (doc 2026-07-15)
+  - popularity: n/a
+  - notes: 100 crons/project on all plans.
+- **Vercel Cron Jobs (Pro) as 1-minute poller** (saas) https://vercel.com/docs/functions/limitations
+  - approach: Pro per-minute cron calling a route that opens an MTProto session (GramJS/mtcute) for 1-3 s, writes to a DB, exits; 300 s default / 800 s max duration.
+  - fit: partial: technically clean 1-min polling with no GitHub involvement, but $20/user/month for a personal project; no persistent socket (functions are duration-bounded).
+  - language_or_stack: Next.js route handler
+  - maintained: current
+  - popularity: n/a
+  - notes: ~43k invocations/month, negligible Active CPU. Overkill cost-wise vs a $2 VM.
+- **JSON/JSONL files in the GitHub repo (raw + Contents API)** (storage) https://docs.github.com/en/rest/repos/contents?apiVersion=2022-11-28
+  - approach: Action appends to data/YYYY-MM.jsonl and commits; dashboard reads via raw.githubusercontent.com (5-min CDN cache, tightened anonymous limits) with ISR revalidate>=300, or via Contents API with a token (5,000 req/h; <=1 MB per file for JSON responses, up to 100 MB raw).
+  - fit: yes: ~0.5 MB/month max, ~6 MB/year, no external service, zero cost, git history is the backup
+  - language_or_stack: git + HTTP
+  - maintained: n/a
+  - popularity: n/a
+  - notes: Public repo exposes your presence history; use a private data repo + PAT if that matters. Keep a rolling latest.json for the dashboard's 'now' widget.
+- **Turso (libSQL)** (database) https://turso.tech/pricing
+  - approach: Hosted SQLite over HTTP; write from Action/VPS with @libsql/client or libsql Python; read from Vercel functions.
+  - fit: yes: Free 5 GB, 10M writes/month, 500M reads/month; Developer $4.99/month
+  - language_or_stack: SQLite/libSQL
+  - maintained: active
+  - popularity: n/a
+  - notes: Best DB fit for tiny time-series rows plus SQL aggregation (hour-of-day/day-of-week stats).
+- **Neon Postgres** (database) https://neon.com/docs/introduction/plans
+  - approach: Serverless Postgres; HTTP driver from Vercel; psycopg/pg from the collector.
+  - fit: yes: Free 0.5 GB, 100 CU-hours/project/month, autosuspend after 5 min (cold-start latency on first query)
+  - language_or_stack: Postgres
+  - maintained: active
+  - popularity: n/a
+  - notes: Available via Vercel Marketplace; Launch plan pay-as-you-go with no minimum.
+- **Supabase Postgres** (database) https://supabase.com/pricing
+  - approach: Postgres + REST (PostgREST) so the Action can write with a plain HTTP call.
+  - fit: partial: Free 500 MB, but project PAUSES after 1 week of inactivity — a collector outage of 7 days bricks the dashboard until manually restored
+  - language_or_stack: Postgres
+  - maintained: active
+  - popularity: n/a
+  - notes: Pro $25/month.
+- **Cloudflare D1** (database) https://developers.cloudflare.com/d1/platform/pricing/
+  - approach: SQLite at the edge, accessed through a Worker binding (or the D1 HTTP API with an API token).
+  - fit: yes on quota (Free 100k writes/day, 5M reads/day, 5 GB) but adds a Worker layer between collector/dashboard and data
+  - language_or_stack: SQLite
+  - maintained: active
+  - popularity: n/a
+  - notes: Only attractive if the collector also lives on Cloudflare.
+- **Upstash Redis (Vercel Marketplace)** (database) https://upstash.com/pricing/redis
+  - approach: REST-accessible Redis; ZADD status events keyed by timestamp.
+  - fit: partial: Free 500K commands/month and 256 MB are ample, but multi-year aggregation in Redis is clumsy versus SQL/JSONL
+  - language_or_stack: Redis
+  - maintained: active
+  - popularity: n/a
+  - notes: Good for a 'current status' cache, poor as the primary store.
+- **Vercel Blob** (storage) https://vercel.com/docs/vercel-blob/usage-and-pricing
+  - approach: put() a JSON file from the Action via @vercel/blob (token) and read it from the dashboard.
+  - fit: partial: free on Hobby but no append semantics (rewrite whole file per poll), put() is a metered 'advanced operation' (~8.6k/month at 5-min cadence), and exceeding Hobby limits blocks access for 30 days
+  - language_or_stack: HTTP/SDK
+  - maintained: current (doc 2026-08-11)
+  - popularity: n/a
+  - notes: Strictly worse than JSONL-in-repo for this workload.
+- **Hetzner Cloud CX23** (hosting-provider) https://www.hetzner.com/pressroom/new-cx-plans/
+  - approach: Shared-vCPU x86 VM (2 vCPU/4 GB/40 GB); run Telethon/GramJS listener under systemd; SQLite locally + push to Turso/GitHub, or write directly to Turso/Neon.
+  - fit: yes: ~EUR 3.99 + EUR 0.50 IPv4 = EUR 4.49/month (2026 third-party figure; EUR 3.79 CX22 in 2024 press release); persistent connection, 1-min or realtime, full control
+  - language_or_stack: Linux VM
+  - maintained: active
+  - popularity: n/a
+  - notes: Confirm current price on hetzner.com; EU locations include 20 TB traffic.
+- **Koyeb eco-nano** (hosting-provider) https://www.koyeb.com/docs/reference/instances
+  - approach: Container (0.1 vCPU/256 MB/2 GB) running a worker process; free instance sleeps after 1 h idle so use the paid nano.
+  - fit: yes: ~$1.61/month, cheapest always-on container found; 256 MB suffices for a Telethon/GramJS listener
+  - language_or_stack: Docker/buildpacks
+  - maintained: active
+  - popularity: n/a
+  - notes: Free tier is not suitable (scale-to-zero after 1 hour without traffic).
+- **Fly.io shared-cpu-1x 256MB** (hosting-provider) https://fly.io/docs/about/pricing/
+  - approach: Firecracker microVM from a Dockerfile; keep 1 machine always running (auto_stop off).
+  - fit: yes: ~$1.94-2.02/month + optional ~$0.15/GB volume; no free tier (trial 2 VM-hours/7 days)
+  - language_or_stack: Docker
+  - maintained: active
+  - popularity: n/a
+  - notes: Very simple `fly launch` DX; billing needs a card.
+- **Railway Hobby** (hosting-provider) https://railway.com/pricing
+  - approach: Deploy repo as a service without a public port (worker); usage-billed ~$20/vCPU-month, ~$10/GB-month RAM.
+  - fit: partial: Hobby $5/month includes $5 credit which covers a tiny 24/7 worker (~$3.5/month); Free plan's $1 credit cannot
+  - language_or_stack: Nixpacks/Docker
+  - maintained: active
+  - popularity: n/a
+  - notes: Nicest DX of the paid PaaS options for a JS dev.
+- **Render Free** (hosting-provider) https://render.com/docs/free
+  - approach: Free web service kept awake by external pings.
+  - fit: no: Background Workers/Cron not on Free; web services sleep after 15 min idle; 750 h/month pool; ephemeral disk
+  - language_or_stack: Docker/native
+  - maintained: active
+  - popularity: n/a
+  - notes: Paid worker needed for a real listener.
+- **Oracle Cloud Always Free (AMD micro / Arm A1)** (hosting-provider) https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm
+  - approach: Free VM (2x E2.1.Micro 1/8 OCPU/1 GB, or A1 flex up to 2 OCPU/12 GB) running the listener.
+  - fit: partial: $0, but A1 allowance halved in mid-2026 and often 'Out of host capacity'; idle-reclaim rule (CPU<20% and network<20% over 7 days) directly targets a near-idle listener on Always Free tenancies; Oracle account/KYC friction
+  - language_or_stack: Linux VM
+  - maintained: active but shrinking
+  - popularity: n/a
+  - notes: AMD micro is the realistic pick; consider upgrading tenancy to PAYG to avoid reclaim (unverified).
+- **Google Cloud e2-micro free tier** (hosting-provider) https://docs.cloud.google.com/free/docs/free-cloud-features
+  - approach: 1 e2-micro instance-month free in us-west1/us-central1/us-east1 with 30 GB PD, 1 GB egress.
+  - fit: yes: effectively $0-2/month (possible small IPv4/other charges not verified), reliable, needs billing account with card
+  - language_or_stack: Linux VM
+  - maintained: active
+  - popularity: n/a
+  - notes: Most dependable 'free' VM; egress of a status listener is negligible.
+- **Home Windows 11 PC / Raspberry Pi** (hosting-provider) https://docs.deno.com/deploy/reference/runtime/
+  - approach: Task Scheduler 'At startup' task or NSSM/WinSW service running the listener (or a 1-min poll); writes to Turso/Neon or pushes JSONL to GitHub.
+  - fit: partial: $0 and realtime-capable, but uptime = PC uptime; if the PC sleeps when you are away from your desk, exactly the mobile-only sessions you want to measure get missed unless the Pi/PC is always-on
+  - language_or_stack: Windows/Linux
+  - maintained: n/a
+  - popularity: n/a
+  - notes: A Pi Zero 2 W (~$15 one-off) with a UPS-less 24/7 uptime is the classic answer; residential IP avoids datacenter-IP concerns with Telegram. (URL is a placeholder; no doc opened for this option.)
+- **Cloudflare Workers + Durable Objects (TCP sockets + alarms)** (hosting-provider) https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/
+  - approach: DO opens an outbound TCP socket to a Telegram DC via cloudflare:sockets, keeps an MTProto session in DO SQLite storage, and an alarm loop reconnects every <=15 min (socket keeps DO alive max 15 min).
+  - fit: no/experimental: no official MTProto client for Workers (mtcute #54 open; MTKruto lists no Workers support), sockets cannot persist across invocations, reconnect gaps every <=15 min; cost would be ~$0 (Free 13k GB-s/day) or $5/month Paid
+  - language_or_stack: JS + custom MTProto transport
+  - maintained: platform active
+  - popularity: n/a
+  - notes: High effort; only worth it as a hobby project in itself.
+- **Deno Deploy (cron)** (hosting-provider) https://deno.com/deploy/pricing
+  - approach: Deno.cron per-minute job running MTKruto poll; app stopped when idle (5 s-10 min), SIGKILL 5 s after SIGINT.
+  - fit: partial: viable for a 1-min POLLER on the Free plan (1M req, 10 CPU-h/month, 1 GiB KV) but not for a persistent listener
+  - language_or_stack: Deno/TypeScript
+  - maintained: active
+  - popularity: n/a
+  - notes: Minimum Deno.cron interval on Deploy not verified.
+
+## Recommendation
+Ranked architectures.
+
+1) SIMPLEST / $0 — "All in GitHub + Vercel Hobby" (fidelity: medium; cost: $0; simplicity: highest). Public repo `telegram-tracker` with `.github/workflows/poll.yml`: `on: schedule: '*/5 * * * *'` plus `workflow_dispatch`; steps: checkout (persist-credentials default), setup-python with pip cache (or setup-node + npm cache), run `collector.py` (Telethon, `StringSession` from `TELEGRAM_SESSION` secret, `users.getUsers(self)`/`GetFullUser`, extract `UserStatusOnline.expires` / `UserStatusOffline.was_online`), append to `data/YYYY-MM.jsonl` ONLY when status or was_online changed (write-on-change), rewrite `data/latest.json`, `git commit && git push` (permissions: contents: write). To defeat the 2026 schedule drift, add a cron-job.org job every 5 min that POSTs the workflow_dispatch endpoint with a fine-grained PAT; keep the `schedule` trigger as backup with `concurrency: { group: poll, cancel-in-progress: false }`. Dashboard: Next.js App Router on Vercel Hobby; Server Component fetches the current and previous month JSONL from `https://raw.githubusercontent.com/<owner>/<repo>/main/data/2026-09.jsonl` with `next: { revalidate: 300 }` (matches raw's 5-min cache), or from the Contents API with a `GITHUB_TOKEN` env var (raw media type) if the data repo is private; optional `/api/revalidate?secret=` called by the Action after each push for instant freshness. Do NOT trigger a Vercel deploy hook per poll (Hobby 100 deploys/day, 60 hook triggers/hour); if you want a fully static site, hit the deploy hook once per hour or on day rollover. Budget: ~8.6-8.9k Actions minutes/month (free only because the repo is public), ~9k Vercel invocations/month, all inside free tiers. Data quality: exact session ends, session starts uncertain by up to the effective poll gap, sub-5-min sessions between polls collapsed; acceptable for hour-of-day/day-of-week heatmaps and approximate daily minutes (~+/-10 min/day).
+
+2) BEST VALUE / HIGH FIDELITY — "Tiny always-on listener + Turso + Vercel" (fidelity: highest; cost: ~$1.6-4.5/month or $0 on GCP e2-micro; simplicity: medium). Run a persistent Telethon (Python) or GramJS/mtcute (Node) process on Koyeb eco-nano (~$1.61), Fly.io shared-cpu-1x 256 MB (~$2), Hetzner CX23 (~EUR 4.49) or the GCP e2-micro free instance; subscribe to `updateUserStatus` for your own user id (realtime online/offline edges) AND run a 60-second heartbeat poll of `users.getUsers` as a self-healing fallback that backfills exact `was_online` after any disconnect; write events to Turso (free, libSQL over HTTP) — schema `events(ts INTEGER, online INTEGER, was_online INTEGER, source TEXT)` plus a nightly `daily_stats` rollup. Dashboard: same Next.js on Vercel Hobby querying Turso (`@libsql/client`) in Server Components with `revalidate: 60`. Optionally mirror the JSONL to GitHub nightly as a backup. This is the only design that gives exact session starts, correct session counts, and true daily minutes; the VM also gives a fixed IP (residential if you use a home Pi), avoiding Telegram seeing a new Azure IP every 5 minutes.
+
+3) MIDDLE — "Home PC/Raspberry Pi listener + GitHub JSONL" (fidelity: high while the box is up; cost: $0; simplicity: medium). Same listener as (2) run as a Windows Task Scheduler at-startup task (or on a Pi), pushing JSONL commits to the GitHub repo every few minutes via a PAT and Vercel reading as in (1). Only choose this if the machine is genuinely always on; a PC that sleeps when you leave will systematically miss mobile-only sessions, biasing exactly the patterns you want to measure.
+
+Avoid: Vercel Hobby crons (daily only), Vercel Pro crons ($20/month for a 1-min poller), Render Free (no workers, sleeps), Railway Free ($1 credit), Oracle A1 (capacity + halved quota + idle reclaim), Cloudflare DO/Workers or Deno Deploy as a persistent MTProto listener (no supported client, eviction/15-min socket limits), and a self-re-dispatching 6-hour GitHub Actions listener (queue gaps + explicit terms-of-service prohibition on unrelated/serverless workloads).
+
+Practical start: build (1) this week (it is ~50 lines of Python/YAML + a Next.js page), keep the collector code hosting-agnostic (a single `collect_once()` plus a `listen_forever()`), and move the collector to a $2 box or e2-micro when you want exact session starts — the dashboard does not change if you keep the JSONL format or point it at Turso through one data-access module.
+
+## Open questions
+- Does Telegram tolerate one MTProto auth_key/StringSession being used from a different Azure datacenter IP every 5 minutes for months (risk: session termination, login alerts, or account flags)? Not covered by hosting docs; needs the Telegram-API researcher / empirical test.
+- Does the polling client's own presence affect the tracked (self) status? Telethon/GramJS do not call account.updateStatus by default, but verify that a fresh connect + users.getUsers does not mark the account online.
+- Official confirmation that commits authored with GITHUB_TOKEN reset the 60-day scheduled-workflow inactivity timer (only inferred from keep-alive actions and community threads).
+- Exact per-job minute rounding rule on GitHub-hosted runners (assumed round-up to the whole minute; the billing page fetched did not state it).
+- Current (2026) unauthenticated request limits for raw.githubusercontent.com after the May 2025 change, and whether Vercel's ISR fetches (~12/hour) could ever hit them.
+- Hetzner 2026 list prices (EUR 3.99 CX23 + EUR 0.50 IPv4) come from a third-party article because hetzner.com's pricing page is JS-rendered; confirm before relying on them.
+- Whether Oracle PAYG-upgraded tenancies are exempt from the Always Free idle-reclaim rule and keep the pre-2026 A1 4 OCPU/24 GB allowance (only community/support-email evidence).
+- GCP e2-micro incidental charges (external IPv4 address, disk snapshot) that could make the 'free' VM cost $1-3/month.
+- Vercel Blob Hobby included quantities (storage GB, simple/advanced ops) were not explicitly tabulated on the pricing page; the example numbers may be Pro.
+- Minimum Deno.cron interval on Deno Deploy and whether Deno.connect (raw TCP) is permitted there (docs fetched did not say).
+- Whether @mtcute/core's platform-agnostic transport can realistically be wired to cloudflare:sockets with DO SQLite storage (issue #54 has snippets but no maintained example).

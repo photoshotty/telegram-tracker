@@ -1,0 +1,208 @@
+# market-analytics
+
+## Summary
+LENS A (commercial/hosted). The market for "Telegram last seen / online trackers" is dominated by parental-control-branded subscription apps (TGSeen by ClevGuard on Android+iOS, "LastSeen on Telegram", TStat, TeleWatch on iOS, MoniMaster "Telegram Status Seen", Tgtracker) and one bot-style service (Statusly, tglastseen.online). All of the app/SaaS products work the same way: you create an account with THEM, enter the target's phone number/username, and THEIR observer accounts poll Telegram; you do not hand over your own Telegram login, but you also get no control over polling interval, no raw data, and only canned charts (login history, daily/weekly bar or line charts, 24h activity graphs, online/offline push alerts). Pricing is aggressive weekly subscriptions ($14.99/week or $19.99/month for TGSeen iOS; TeleWatch $4.99-$49.99/week tiers; LastSeen reportedly ~$15/week per contact). Ratings are poor (TGSeen iOS 1.0/5 from 2 ratings; TeleWatch 4.2/5 from 76 but last updated Oct 2021; LastSeen ~3.3/5 per search snippet). None offer a documented export/API. All explicitly admit they cannot see anything if the target hides last seen (they only see what a stranger sees), which is exactly why the user's plan to keep "Everybody" works. They CAN track your own account (you just enter your own number), but the value proposition is weak versus a 100-line Telethon/GramJS script, and privacy-wise you are letting a third party log your presence indefinitely, with App Store privacy labels declaring cross-app tracking identifiers. Telegram itself offers no personal usage/screen-time stats (FAQ has nothing; only channel/group statistics exist for admins). OS-level iOS Screen Time and Android Digital Wellbeing measure foreground app time/pickups/notifications on ONE device, which is a different signal from Telegram "online" status: online status is a server-side presence flag set by any of your logged-in clients (phone, desktop, web) via account.updateStatus, times out on its own, and is visible to others; screen time is local, per device, and includes time when Telegram may not even be reporting online. Open-source GitHub projects (gentoo-root/telegram-tracker 104 stars; cubicbyte/telegram-tracker 27 stars; HuntingLastTelegramSeen with a Streamlit dashboard; tg-lover-tracker for sleep inference; waheeb71/telegram-activity-monitor with Postgres + daily aggregates) are all Python/Telethon userbots and show the two standard designs: (a) poll every 10-15 s and log transitions, marking offline transitions "exact" from was_online and online transitions "approximate", or (b) subscribe to UserUpdate events and store status_time/expires/was_online.
+
+LENS B (analytics design). Primary facts from official docs/source: UserStatus has 6 constructors (empty, online{expires}, offline{was_online}, recently, lastWeek, lastMonth); userStatusOnline.expires = "point in time (Unix timestamp) when the user's online status will expire" (TDLib docs); userStatusOffline.was_online = time last seen online (exact Unix ts). Clients refresh presence with account.updateStatus(offline=false) periodically (Telegram Desktop: every online_update_period_ms from server config, default 120 s; Android: every 55 s while foreground) and send account.updateStatus(offline=true) quickly when the app loses focus/is paused (Desktop: after offline_idle_timeout_ms default 30 s idle or on blur; Android: ~2 s after pause). So offline transitions are normally explicit and prompt; the `expires` timeout (a few minutes, server-chosen; not documented as a number) only matters when the client dies/loses network without sending offline. Telegram FAQ adds that regardless of privacy you appear online for ~30 s after sending/reading/typing (tdesktop encodes this as kSetOnlineAfterActivity = 30 s). Derivation algorithm: treat each poll as a sample (ts_polled, status, was_online|expires). An offline sample carries was_online = exact end of the most recent online interval, so ANY offline sample after an online sample gives an exact end_ts, and a jump in was_online between two consecutive offline samples reveals a whole session that happened between polls (start unknown, end exact, length lower-bounded by 0 and upper-bounded by was_online - prev_poll_ts). Online sample after offline sample: session start is in (prev_poll_ts, this_poll_ts]; store start_ts = this_poll_ts with start_is_exact=false and start_lower_bound = prev_poll_ts (or min(prev_poll_ts, expires - typical_ttl) if you later calibrate the TTL). Realtime updateUserStatus events give exact starts (event arrival ts, within network latency) and exact ends (was_online); events can be lost during disconnects, so on reconnect reconcile via a poll. Dedupe/idempotency: key raw samples by (user_id, ts_polled) and raw events by (user_id, status_kind, status_ts); sessions are recomputed deterministically from raw data (append-only raw, derived tables rebuildable), with a monotonic "processed_up_to" watermark. Store everything as UTC epoch seconds; derive day/hour buckets in the user's IANA tz at query/render time (split sessions at local midnight for daily minutes). Minimal schema: samples(id, user_id, ts_polled, status ENUM(online,offline,recently,week,month,empty), was_online NULL, expires NULL, source ENUM(poll,event), run_id) UNIQUE(user_id, ts_polled, source); sessions(id, user_id, start_ts, start_is_exact, start_lower_bound, end_ts NULL while open, end_is_exact, min_duration_s, max_duration_s); daily(user_id, local_date, tz, online_seconds_min, online_seconds_max, session_count, first_online_ts, last_online_ts, coverage_ratio = polls_received/polls_expected). Visualizations: daily online-minutes bar chart with min/max uncertainty band; hour-of-day x weekday heatmap (like WaStat's clock view / 30-day charts); session length histogram and count per day; first/last online per day dot plot (sleep/wake proxy as in tg-lover-tracker); streaks; "live now" indicator from latest status with `expires` countdown; a timeline strip per day (as in TGSeen/whatsapp trackers). Failure modes: (1) self-pollution - if the collector logs in as the SAME account, its own requests can flip you online (Telethon maintainer: "some requests update it, some don't, and it can always be set manually"); use a separate observer account (second number) or at least never call account.updateStatus(offline=false) and verify by watching your own status from another device; (2) GitHub Actions schedule is 5-min minimum and routinely delayed minutes to hours (docs + community threads), so poll gaps must be modeled via coverage_ratio and start_lower_bound, not assumed; (3) if privacy is ever changed to hide last seen, samples become userStatusRecently and exact timestamps vanish (FAQ: recently = up to ~2-3 days); (4) FloodWait / anti-spam: Telethon FAQ warns third-party clients get flagged, especially new or VoIP numbers; a single users.getUsers every few minutes is far below limits but handle FloodWaitError; (5) updateUserStatus events may not be delivered for non-contacts (make the observer add your account as a contact); (6) multi-device: any client keeps you online, so "online" measures Telegram presence, not phone usage.
+
+## Findings
+- [high] Telegram MTProto UserStatus has six constructors: userStatusEmpty, userStatusOnline{expires}, userStatusOffline{was_online}, userStatusRecently, userStatusLastWeek, userStatusLastMonth. expires is 'time to expiration of the current online status'; was_online is 'time the user was last seen online' (Unix ts). updateUserStatus{user_id, status} is described as 'Contact status update'.
+  - notes: TDLib wording: expires = 'Point in time (Unix timestamp) when the user's online status will expire'. The update being called a 'Contact status update' hints that push updates are contact-scoped.
+  - src: https://core.telegram.org/type/UserStatus
+  - src: https://core.telegram.org/constructor/userStatusOnline
+  - src: https://core.telegram.org/constructor/userStatusOffline
+  - src: https://core.telegram.org/constructor/updateUserStatus
+  - src: https://core.telegram.org/tdlib/docs/classtd_1_1td__api_1_1user_status_online.html
+- [high] Clients set presence explicitly with account.updateStatus(offline: Bool) ('Only users can use this method', so Bot API bots cannot). Server config exposes online_update_period_ms ('client should update its online status every N ms'), offline_blur_timeout_ms ('delay before offline status needs to be sent'), offline_idle_timeout_ms ('time without user activity after which it should be treated offline'), and online_cloud_timeout_ms/notify_cloud_delay_ms (notification delays, not status TTL).
+  - notes: Telegram Desktop's stored defaults for these: OnlineUpdatePeriod 120000, OfflineBlurTimeout 5000, OfflineIdleTimeout 30000, OnlineCloudTimeout 300000 ms (from gotd's parser of tdesktop config).
+  - src: https://core.telegram.org/method/account.updateStatus
+  - src: https://core.telegram.org/constructor/config
+- [high] Telegram Desktop re-sends account.updateStatus(online) every onlineUpdatePeriod (default 120 s) while the window is active and user is not idle, sends offline once idle >= offlineIdleTimeout (30 s) or when no window is active, and locally sets its own status to OnlineTill(now + onlineUpdatePeriod). tdesktop also has kSetOnlineAfterActivity = 30 s (a user who acts in chat is shown online for 30 s).
+  - notes: Read directly from Updates::updateOnline() and UserData::madeAction() in tdesktop source. Implication: the 'online' TTL seen in expires is on the order of a couple of minutes, and offline is normally reported promptly rather than by expiry.
+  - src: https://raw.githubusercontent.com/telegramdesktop/tdesktop/dev/Telegram/SourceFiles/api/api_updates.cpp
+  - src: https://raw.githubusercontent.com/telegramdesktop/tdesktop/dev/Telegram/SourceFiles/data/data_user.cpp
+  - src: https://pkg.go.dev/github.com/gotd/td/session/tdesktop
+- [high] Telegram Android (official client) sends account.updateStatus(offline=false) when foreground and re-sends it if >= 55 s elapsed since the last successful one; it sends account.updateStatus(offline=true) about 2 s after the app is paused (backgrounded).
+  - notes: MessagesController.updateTimerProc(): condition `Math.abs(now - lastStatusUpdateTime) >= 55000 || offlineSent` for online; `Math.abs(now - getPauseTime()) >= 2000` for offline. So on Android, backgrounding produces an exact was_online within seconds; the multi-minute 'expires' only governs crash/network-loss cases.
+  - src: https://raw.githubusercontent.com/DrKLO/Telegram/master/TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java
+- [high] Telegram FAQ: hiding your last seen hides others' exact last seen from you; approximate buckets are 'recently' (1 s to 2-3 days), 'within a week' (2-3 to 7 days), 'within a month' (6-7 to 30 days), 'a long time ago' (>1 month). Regardless of settings you appear online ~30 s after sending a DM, reading their message in a 1:1, or typing. The FAQ contains no personal usage/time statistics feature.
+  - notes: Premium reportedly lets you keep seeing others' last seen while hiding yours (search snippets only, not verified on a Telegram page).
+  - src: https://telegram.org/faq
+- [high] Telegram API privacy key inputPrivacyKeyStatusTimestamp controls who can see last seen/online, with allow/disallow all/contacts/specific/close-friends rules; the API docs do not define the approximate buckets.
+  - src: https://core.telegram.org/api/privacy
+- [high] Telegram API ToS forbids clients that interfere with 'preventing last seen and online statuses from being displayed correctly' and 'making actions on behalf of the user without the user's knowledge and consent'; Telethon FAQ warns any third-party library can trigger account limitation, particularly new accounts, VoIP numbers, and certain countries, and shows handling of FloodWaitError.
+  - notes: Passive polling of your own status at 5-15 min intervals is not spam-like, but using a freshly created observer number carries ban risk; use an aged account.
+  - src: https://core.telegram.org/api/terms
+  - src: https://docs.telethon.dev/en/stable/quick-references/faq.html
+- [high] Telethon's UserUpdate event exposes .online, .last_seen (exact datetime if known), .until (datetime until which user appears online), .status, plus .recently/.within_weeks/.within_months; docs do not state whether events are limited to contacts.
+  - src: https://docs.telethon.dev/en/stable/modules/events.html
+- [medium] Telethon maintainer on how an account becomes 'online' from a script: 'Some requests update it, some don't, and it can always be set manually' (via account.UpdateStatusRequest); sending a message notably did not set online. Hence a userbot running on the tracked account can pollute its own presence signal unpredictably.
+  - notes: Telethon repo was archived 2026-02-21 (read-only) per the issue page; still installable but consider GramJS (JS) or Pyrogram forks. Exact list of status-setting requests is undocumented: verify empirically by watching your own status from a second device while the collector runs.
+  - src: https://github.com/LonamiWebs/Telethon/issues/328
+- [high] GitHub Actions schedule: minimum interval 5 minutes; 'can be delayed during periods of high loads', high load at the start of every hour; jobs may be dropped; scheduled workflows in public repos auto-disable after 60 days without activity. Community reports document consistent 15-60 minute delays and occasionally multi-hour drift.
+  - notes: Community threads (github.com/orgs/community/discussions/156282, /201738, /196910) appeared in search results reporting 30-60 min delays and 8-14 h delays; not opened individually. Design consequence: never assume fixed cadence; record actual ts_polled and compute coverage.
+  - src: https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+- [high] iOS Screen Time and Android Digital Wellbeing measure per-app foreground usage time, pickups/unlocks and notifications on a single device; this is device-local app usage, not Telegram's server-side 'online' presence which is set by any logged-in client and visible to others.
+  - src: https://support.apple.com/en-us/108806
+  - src: https://support.google.com/android/answer/9346420
+- [high] TGSeen (ClevGuard) works by creating a TGSeen account and entering the target's phone number/username; no login to the target's Telegram is needed ('Incognito mode', 'no download or installation on the target phone'); it logs 'all login history' with a 'visualized chart of online activity', multi-account dashboard and login alerts; it admits it cannot get exact times if the target hides last seen. iOS: $14.99/week, $19.99/month, 3-day trial, rated 1.0/5 (2 ratings), v1.1.1 2025-08-28, privacy label includes cross-app tracking IDs. Android (CLEVERGUARD TECHNOLOGY CO., LIMITED) v1.3.0 2025-10-31.
+  - notes: Google Play page could not be parsed (truncated). Can track your own number, but no export/API and vendor retains your presence history.
+  - src: https://www.clevguard.com/telegram-last-seen-tracker/
+  - src: https://apps.apple.com/us/app/tgseen-online-status-tracker/id6618141170
+  - src: https://apkpure.com/last-seen-on-telegram-tgseen/com.clevguard.tgseen.tracker
+- [high] TeleWatch (TGTOOLS LTD, iOS) requires phone number verification, then gives online/offline push notifications, 24-hour activity graphs and profile-change alerts; weekly/monthly tiers from $4.99/week to $49.99/month; 4.2/5 from 76 ratings; last updated v1.3 on 2021-10-29 (stale).
+  - src: https://apps.apple.com/us/app/telewatch-tracker-for-telegram/id1563549649
+- [medium] MoniMaster's roundup lists phone-number-only trackers (MoniMaster Telegram Status Seen, LastSeen on Telegram, TeleWatch, Tgtracker, 'Last Seen Telegram') all on paid subscriptions with activity logs/notifications and no exports; LastSeen on Telegram is reported (search snippet) at ~$15/week per tracked contact and ~3.3/5 from 5.7k ratings.
+  - notes: Vendor marketing content; LastSeen pricing/ratings came from search snippets, its Play/AppBrain pages returned 403/truncated.
+  - src: https://www.monimaster.com/telegram/telegram-last-seen-tracker/
+- [low] Statusly (tglastseen.online) is a Telegram-bot-based watcher that alerts on online/offline changes and keeps a recent activity timeline 'depending on your plan', explicitly working only with statuses visible to 'your connected Telegram account' (i.e., it appears to require connecting your own account).
+  - notes: Site failed TLS handshake twice (tglastseen.online); description derived from search-engine snippets only. Treat as unverified.
+- [high] Open-source reference implementations: gentoo-root/telegram-tracker (Python/Telethon, 104 stars) polls every 15 s and marks offline transitions '=' (exact, from server was_online) and online transitions '~' (approximate, local detection), noting sub-interval sessions can be missed; cubicbyte/telegram-tracker (27 stars, MIT) instead subscribes to UserUpdate events and stores status boolean, status_time, status_expires and was_online in SQLite/MySQL; SalehNiknejad/HuntingLastTelegramSeen logs to JSON and ships a Streamlit dashboard (status-over-time chart, frequency stats, tables, txt export); Jamesits/tg-lover-tracker infers sleep from the longest gap between status events in a rolling 24h window with per-user timezone; waheeb71/telegram-activity-monitor polls every 10 s into Postgres with activity logs + daily aggregates + peak-hour detection; serga-kiev/telegram-status-monitor is a polling bot with /setdelay.
+  - notes: All are Python/Telethon userbots; none use GitHub Actions; none run on the tracked account itself (they track contacts).
+  - src: https://github.com/gentoo-root/telegram-tracker
+  - src: https://raw.githubusercontent.com/cubicbyte/telegram-tracker/master/main.py
+  - src: https://github.com/cubicbyte/telegram-tracker
+  - src: https://github.com/SalehNiknejad/HuntingLastTelegramSeen
+  - src: https://github.com/Jamesits/tg-lover-tracker
+  - src: https://github.com/waheeb71/telegram-activity-monitor
+  - src: https://github.com/serga-kiev/telegram-status-monitor
+  - src: https://github.com/ostrolucky/telegram-stalker
+- [medium] WhatsApp analogues show the presentation patterns worth copying: WaStat presents online intervals in a 'clock view' plus 30-day daily charts and online-now notifications (free, 1.5/5 from 2 reviews, ~2k downloads on soft112); remcostoeten/whatsapp-online-status-tracker (Python/Flask/Chart.js) reports timestamps, duration online, percent of time online, daily pattern analysis and a visual timeline.
+  - src: https://wastat-whatsapp-tracker.soft112.com/
+  - src: https://github.com/remcostoeten/whatsapp-online-status-tracker
+- [low] Third-party blog claims (unofficial) that Telegram keeps showing 'online' for ~30-120 s after the app closes due to heartbeat buffering, and that any other logged-in device keeps you online; consistent with the client source above but the numbers are not from Telegram.
+  - src: https://socsignal.com/en/telegram/why-does-telegram-show-you-as-online-when-you-re-not-using-it/
+- [high] DESIGN - session derivation from polls: (1) offline sample after online sample => end_ts = was_online, end_is_exact = true; (2) two consecutive offline samples whose was_online differs => a hidden session ended exactly at the new was_online, start unknown in (prev_poll_ts, new was_online], min_duration 0; (3) online sample after offline/none => open session, start_is_exact=false, start_ts=this_poll_ts, start_lower_bound=prev_poll_ts (or last known was_online if later), and optionally start_estimate = expires - measured_TTL once the TTL has been calibrated from samples; (4) consecutive online samples => extend open session; if expires moved forward the client re-pinged. Session length bounds: min = end_ts - start_ts (poll-observed), max = end_ts - start_lower_bound. Aggregate min/max separately and render an uncertainty band.
+  - notes: Rule (2) is what makes coarse 5-15 minute polling still yield exact 'last online' timestamps for every session that ended before a poll; only starts and sub-interval on/off flapping are lost.
+  - src: https://core.telegram.org/constructor/userStatusOffline
+  - src: https://core.telegram.org/constructor/userStatusOnline
+  - src: https://github.com/gentoo-root/telegram-tracker
+- [medium] DESIGN - session derivation from realtime updateUserStatus events: online event => start_ts = server/receive time (exact to within seconds), offline event => end_ts = was_online (exact). Events can be missed during collector disconnects, so on (re)connect issue one poll (users.getUsers) and reconcile: if poll says offline with was_online > last known end, close the open session at was_online; if poll says online and no open session, open one with start_is_exact=false bounded by disconnect time. Store events and polls in the same raw table with source in {poll,event}.
+  - notes: Whether the observer must have the tracked user as a contact to receive updateUserStatus is undocumented; add as contact to be safe.
+  - src: https://core.telegram.org/constructor/updateUserStatus
+  - src: https://docs.telethon.dev/en/stable/modules/events.html
+  - src: https://raw.githubusercontent.com/cubicbyte/telegram-tracker/master/main.py
+- [high] DESIGN - idempotent append-only storage and time handling: raw rows keyed by UNIQUE(user_id, ts_polled, source) so a re-run/duplicate GitHub Actions job upserts harmlessly; keep run_id/scheduled_ts so expected-vs-actual cadence (coverage_ratio) can be computed; derived sessions/daily tables are rebuilt from raw via a pure function (recompute from last closed session backwards) rather than mutated in place; all timestamps stored as UTC epoch seconds (Telegram already gives Unix ts); day/hour bucketing is done in the viewer's IANA timezone at query/render time, and sessions crossing local midnight are split before summing daily minutes; DST handled automatically by tz-aware bucketing.
+  - src: https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+- [high] DESIGN - failure modes to encode: self-pollution (collector on the same account; mitigate with a separate observer account, never calling updateStatus(online), and a 'collector_online' flag if the collector's own status is ever observed online), poll gaps (coverage_ratio per day; grey-out days below threshold), privacy flip (samples with status in {recently,week,month} => mark day as 'exact timestamps unavailable' and stop deriving sessions), FloodWait (respect e.seconds, back off, never retry in a tight loop), multi-device presence (document that 'online' = any Telegram client active), status flapping shorter than the poll interval (invisible; only realtime events catch it).
+  - src: https://github.com/LonamiWebs/Telethon/issues/328
+  - src: https://docs.telethon.dev/en/stable/quick-references/faq.html
+  - src: https://telegram.org/faq
+
+## Candidates
+- **TGSeen - Last Seen on Telegram (ClevGuard)** (android-app + ios-app + saas) https://www.clevguard.com/telegram-last-seen-tracker/
+  - approach: You register with TGSeen and enter the target's phone number/username; TGSeen's own observer infrastructure polls Telegram public presence. No install on target, no Telegram login handed over.
+  - fit: partial - can track your own number and shows login history + charts + alerts, but no raw data export/API, weekly-priced subscription, vendor keeps your presence history; cannot see anything if last seen hidden (not an issue for this user).
+  - language_or_stack: closed-source mobile apps + vendor backend
+  - maintained: iOS v1.1.1 2025-08-28; Android v1.3.0 2025-10-31
+  - popularity: iOS 1.0/5 from 2 ratings; Play data not retrievable
+  - notes: iOS pricing $14.99/week, $19.99/month, 3-day trial; privacy label: cross-app tracking identifiers, device ID, crash data.
+- **TeleWatch tracker for Telegram (TGTOOLS LTD)** (ios-app) https://apps.apple.com/us/app/telewatch-tracker-for-telegram/id1563549649
+  - approach: Phone-number verification, then vendor tracks public online/offline status; push alerts, 24h activity graphs, profile-change alerts.
+  - fit: partial - could track own number but stale (2021), no export, subscription.
+  - language_or_stack: closed-source iOS
+  - maintained: v1.3 2021-10-29 (stale)
+  - popularity: 4.2/5 from 76 ratings
+  - notes: Individual $4.99/wk or $14.99/mo; Family $9.99/wk or $24.99/mo; Enterprise $19.99/wk or $49.99/mo.
+- **LastSeen on Telegram (telegram.family.tracker.app)** (android-app) https://play.google.com/store/apps/details?id=telegram.family.tracker.app
+  - approach: Phone-number based vendor tracking with online/offline notifications and 'activity monitoring'; 3-day trial.
+  - fit: partial - own number trackable; no export; expensive per-contact weekly billing per search snippets.
+  - language_or_stack: closed-source Android
+  - maintained: unknown (Play/AppBrain pages returned 403/truncated)
+  - popularity: ~3.3/5 from ~5.7k ratings (search snippet, unverified)
+  - notes: Reported ~$15/week per tracked contact.
+- **TStat: Lastseen Checker** (android-app) https://play.google.com/store/apps/details?id=com.tstat.lastseen.online.status.tracker.family.monitor
+  - approach: Real-time lastseen monitoring of contacts, 'free trial' per listing snippet.
+  - fit: partial/unknown - listing could not be parsed.
+  - language_or_stack: closed-source Android
+  - maintained: unknown
+  - popularity: unknown
+  - notes: Only search snippet available.
+- **MoniMaster Telegram Status Seen / MoniMaster Pro** (saas + monitoring app) https://www.monimaster.com/telegram/telegram-last-seen-tracker/
+  - approach: Status Seen: enter target number only, vendor polls; MoniMaster Pro: spyware-style app installed on target device (40+ features).
+  - fit: partial (Status Seen) / no (Pro is device spyware, overkill and legally sensitive).
+  - language_or_stack: closed-source
+  - maintained: page current in 2025
+  - popularity: unknown
+  - notes: Marketing page; subscription pricing not disclosed on the page opened.
+- **Statusly (tglastseen.online)** (telegram-bot / saas) http://tglastseen.online/
+  - approach: Per search snippets: a Telegram bot with a watchlist that alerts on online/offline changes and keeps a recent timeline; works only with statuses visible to 'your connected Telegram account' (appears to require linking your own account).
+  - fit: unknown - site unreachable (TLS error) so plans, export and login model unverified.
+  - language_or_stack: unknown
+  - maintained: unknown
+  - popularity: unknown
+  - notes: Low confidence; not opened.
+- **gentoo-root/telegram-tracker** (github-repo) https://github.com/gentoo-root/telegram-tracker
+  - approach: Telethon userbot polls a user's status every 15 s; logs transitions with '=' for exact server timestamps (offline via was_online) and '~' for locally detected (online) transitions.
+  - fit: partial - correct exact/approx modelling but text log only, no stats, needs an always-on process.
+  - language_or_stack: Python 3.6+ / Telethon
+  - maintained: 9 commits; date not shown
+  - popularity: 104 stars, 44 forks
+  - notes: Best minimal reference for the poll-derivation logic.
+- **cubicbyte/telegram-tracker** (github-repo) https://github.com/cubicbyte/telegram-tracker
+  - approach: Telethon userbot subscribing to UserUpdate events; stores online bool, status_time, status_expires, was_online into SQLite/MySQL.
+  - fit: partial - good event-based schema reference; no analytics.
+  - language_or_stack: Python 3.7+ / Telethon, MIT
+  - maintained: 41 commits; date not shown
+  - popularity: 27 stars, 9 forks
+  - notes: Author built it for data-analysis practice.
+- **SalehNiknejad/HuntingLastTelegramSeen** (github-repo) https://github.com/SalehNiknejad/HuntingLastTelegramSeen
+  - approach: Telethon bot logs UserStatusOnline/Offline to status_log.json; Streamlit dashboard with status-over-time chart, frequency stats, filterable table, txt export; remote control via Telegram commands.
+  - fit: partial - shows a simple dashboard layout; JSON storage, no session/heatmap analytics.
+  - language_or_stack: Python / Telethon / Streamlit
+  - maintained: 33 commits; date not shown
+  - popularity: 0 stars
+- **Jamesits/tg-lover-tracker (trusted sleep bot fork)** (github-repo) https://github.com/Jamesits/tg-lover-tracker
+  - approach: Records status events, infers sleep as the longest inactivity gap in a rolling 24h window in the user's timezone; /status, /average commands.
+  - fit: partial - useful pattern for first/last-online-per-day and sleep inference; timezone-aware.
+  - language_or_stack: Python; Bot API + telegram-cli dual stack
+  - maintained: old fork
+  - popularity: unknown
+  - notes: States it is inaccurate when the user hides online status.
+- **waheeb71/telegram-activity-monitor** (github-repo) https://github.com/waheeb71/telegram-activity-monitor
+  - approach: Telethon userbot polling every 10 s (online/offline/typing) into PostgreSQL with activity logs, daily aggregated statistics, peak-hour detection.
+  - fit: partial - daily aggregate table pattern; oriented to correlating pairs of users.
+  - language_or_stack: Python 3.8+ / Telethon / PostgreSQL
+  - maintained: 4 commits
+  - popularity: 1 star
+- **serga-kiev/telegram-status-monitor** (github-repo) https://github.com/serga-kiev/telegram-status-monitor
+  - approach: Telethon polling bot with /add phone, /setdelay seconds, alerts on change.
+  - fit: no - alerts only, no history analytics.
+  - language_or_stack: Python 3 / Telethon
+  - maintained: unknown
+  - popularity: 3 stars
+- **ostrolucky/telegram-stalker** (github-repo) https://github.com/ostrolucky/telegram-stalker
+  - approach: telegram-cli based script logging status changes 'without you being seen online'.
+  - fit: no - depends on abandoned telegram-cli.
+  - language_or_stack: Python 3 + telegram-cli
+  - maintained: abandoned-era
+  - popularity: unknown
+- **WaStat - WhatsApp tracker** (android-app (WhatsApp analogue)) https://wastat-whatsapp-tracker.soft112.com/
+  - approach: Tracks WhatsApp online intervals; presents them in a clock view and 30-day daily charts; online notifications; up to 10 profiles.
+  - fit: no (WhatsApp) - relevant only as a presentation reference.
+  - language_or_stack: closed-source Android
+  - maintained: listed 2025-08-19
+  - popularity: 1.5/5 from 2 reviews, ~2k downloads (soft112)
+- **remcostoeten/whatsapp-online-status-tracker** (github-repo (WhatsApp analogue)) https://github.com/remcostoeten/whatsapp-online-status-tracker
+  - approach: Selenium on WhatsApp Web + Flask + Chart.js; reports timestamps, duration online, percent of time online, daily pattern analysis, visual timeline; persists between sessions.
+  - fit: no (WhatsApp) - presentation reference for timeline/percent-online views.
+  - language_or_stack: Python / Flask / Chart.js / Tailwind
+  - maintained: unknown
+  - popularity: unknown
+- **es1n/telegram_online (Docker)** (docker-image) https://hub.docker.com/r/es1n/telegram_online
+  - approach: MadelineProto client that forces your account online every 5 s (opposite of tracking).
+  - fit: no - included only as evidence that userbot clients can drive your own presence, i.e. self-pollution is real.
+  - language_or_stack: PHP / MadelineProto
+  - maintained: unknown
+  - popularity: unknown
+
+## Recommendation
+Do not buy a commercial tracker: they are weekly-subscription parental-control apps with poor ratings, no export, and they retain your presence history; the only thing they do that you cannot is run an observer account 24/7. Build your own. Key design decisions from this lens: (1) run the collector as a SEPARATE observer Telegram account (aged number, added as mutual contact) rather than a userbot on the tracked account, to avoid self-pollution and to be able to receive updateUserStatus for you; never call account.updateStatus(offline=false) from the collector. (2) Treat polling as the ground-truth baseline (every poll returns either online{expires} or offline{was_online}; the latter gives exact session ends even across poll gaps) and add a realtime event listener only if you later move to an always-on host; with GitHub Actions expect 5-min minimum cadence with routine 10-60 min delays, so store actual ts_polled and a coverage ratio, and model session starts as bounded intervals (start_lower_bound = previous poll). (3) Schema: append-only samples(user_id, ts_polled, status, was_online, expires, source, run_id) with UNIQUE(user_id, ts_polled, source); derived sessions(start_ts, start_is_exact, start_lower_bound, end_ts, end_is_exact, min_duration_s, max_duration_s) rebuilt deterministically; daily(local_date, tz, online_seconds_min/max, session_count, first_online_ts, last_online_ts, coverage_ratio). Store UTC epoch seconds; bucket by hour/weekday in the viewer's IANA tz at render time, splitting sessions at local midnight. (4) Dashboard: live-now badge (latest status + expires countdown), daily online minutes bars with min/max uncertainty band, hour-of-day x weekday heatmap, per-day timeline strip, session-length histogram and sessions/day, first/last online per day (sleep/wake proxy), streaks, and a data-quality strip (coverage, 'recently' days). (5) Empirically calibrate the online TTL by logging expires - now on online samples (clients re-ping every ~55-120 s and send offline within seconds of backgrounding, so TTL mostly matters for crash/network-loss cases), and verify from a second device that the collector never flips you online. (6) Keep privacy at 'Everybody' or at least allow the observer account explicitly; if samples ever come back as userStatusRecently, flag those days rather than deriving fake sessions. Python/Telethon has the most reference code but Telethon was archived in Feb 2026; GramJS (gram.js.org) is the natural choice for a JS developer and exposes the same users.getUsers / UpdateUserStatus primitives.
+
+## Open questions
+- Exact server-side TTL encoded in userStatusOnline.expires (Telegram docs give no number; client sources suggest ~1-2 minutes after last updateStatus ping, blog claims 30-120 s) - measure expires - now empirically on first samples.
+- Which MTProto requests implicitly mark the calling account online (Telethon maintainer: 'some requests update it, some don't') - relevant only if the collector runs on the tracked account; verify by watching own status from another device.
+- Whether updateUserStatus pushes are delivered for non-contacts / users without an open dialog (docs call it a 'Contact status update'; not verified) - make the observer a mutual contact.
+- Whether querying your own user via users.getUsers(self) returns a real userStatusOnline/Offline for yourself or a locally synthesized value (tdesktop sets self status locally) - test before relying on a same-account collector.
+- Statusly (tglastseen.online) pricing, login model and export could not be verified (site TLS failure).
+- Google Play ratings/downloads for TGSeen, LastSeen on Telegram and TStat could not be retrieved (Play pages truncated, AppBrain 403).

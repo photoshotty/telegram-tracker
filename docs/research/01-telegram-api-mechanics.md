@@ -1,0 +1,227 @@
+# api
+
+## Summary
+TELEGRAM API MECHANICS. UserStatus has 6 constructors: userStatusEmpty ("status has not been set yet"), userStatusOnline{expires:int} ("time to expiration of the current online status", unix seconds), userStatusOffline{was_online:int} ("time the user was last seen online", unix seconds), and three approximate buckets userStatusRecently/LastWeek/LastMonth each with a flags.0 `by_me` bit meaning "the exact status is hidden from ME because I hid my own last seen and have no Premium" (TDLib wording: "Exact user's status is hidden because the current user enabled userPrivacySettingShowStatus privacy setting for the user and has no Telegram Premium"). Timestamps are 1-second unix precision; Telegram Desktop maps both userStatusOnline.expires and userStatusOffline.was_online onto a single "online till T" value (data_user.cpp LastseenFromMTP). Presence is NOT inferred from API traffic: it is driven by account.updateStatus(offline:Bool) ("Updates online user status", users only). Official clients send updateStatus(offline=false) only while a window is active and the user was non-idle within offline_idle_timeout (tdesktop defaults: onlineUpdatePeriod 120000 ms, offlineIdleTimeout 30000, offlineBlurTimeout 5000, onlineCloudTimeout 300000; re-sent every onlineUpdatePeriod), and updateStatus(offline=true) when idle/closing. TDLib only sends it when the app sets option "online" (writable, default false) and then re-sends every online_update_period_ms (TDLib default 210000); locally it assumes online lasts unix_time+300 s. Telethon maintainer (issue #328): joining channels / sending messages did NOT make the account online; "Some requests update it, some don't, and it can always be set manually"; mtcute FAQ: "call setOffline(false) periodically to tell Telegram that you are online". So a userbot that only connects and calls users.getUsers should NOT appear online (medium-high confidence; "some requests update it" is unresolved and must be verified empirically for the exact call set used). Self status: TDLib's UserManager applies updateUserStatus to the OWN user id (was_online_remote_, "only update was_online_remote_ from updateUserStatus") and NotificationManager uses it ("If we are offline, but online from some other client, then delay notification"), i.e. the server pushes and returns the account's own status reflecting OTHER devices; the gentoo-root/telegram-tracker Telethon poller documents `me` as a valid target. Hence same-account self-tracking is feasible IF the collector never sends updateStatus(offline=false). Realtime: updateUserStatus is documented only as "Contact status update"; core docs additionally instruct clients to call contacts.getStatuses every 70000-100000 s (randomised) to refresh contacts' status, and TDLib maintainer (Feb 2025, #3258): "It is impossible to know exact status of all other Telegram users... The information is updated whenever needed and updates are sent after that." No official statement covers non-contacts; treat push as best-effort and poll users.getUsers(inputUserSelf) as source of truth. Long-running listeners must keep the connection alive and detect gaps: TDLib calls updates.getState every ~300 s (PING_SERVER_TIMEOUT=300) and Telethon runs a 60-s keepalive ping and a getDifference-on-timeout path; Telethon #4622 shows the v1 update loop can stall ("Timeout waiting for updates expired") until process restart, so build in reconnect + catch_up. Bot API User object has no status/presence field and TDLib drops updateUserStatus in bot mode ("if is_bot return"); bots cannot see online status.
+
+PRIVACY. Options are Everybody / My Contacts / Nobody with exceptions (telegram.org/blog/privacy-revolution); reciprocity rule "you won't see Last Seen timestamps for people with whom you don't share your own"; approximate buckets: recently = 1 s–2-3 days, within a week = 2-3–7 days, within a month = 6-7 days–1 month, long time ago > 1 month (FAQ). Jan-2024 update: Premium users may hide their own last seen/read time and still see others' who share; "If you hide your last seen or read time, it is always hidden from all users – including Premium users" (bugs.telegram.org admin confirms). No evidence of any 2024-2026 change to the default; the only source found stating the default is Everybody is HowToGeek ("By default, Telegram shows anyone and everyone the last time you were online") — official docs found do not state the default (medium confidence). Consequence for a second observer account: it must itself share last seen (or have Premium) or it will get userStatusRecently(by_me=true) instead of exact timestamps.
+
+RATE LIMITS / SAFETY / LIBRARIES. users.getUsers lists no FLOOD errors; the expensive call is username resolution (contacts.resolveUsername) which produced 24-h FloodWaits even at one call per 4 minutes (Telethon #494); using inputUserSelf or a cached id+access_hash avoids it. Prior trackers polled every 15 s (gentoo-root, Telethon) and 10 s (TDLib #3258) without reported floods; 60 s polling of a single users.getUsers is very likely safe but undocumented ("limits are unknown, don't spam" — Telethon docs). Account risk: Telethon FAQ/v2 FAQ recommend "well-established accounts (and not an account you just created)", avoid VoIP numbers; since 18 Feb 2023 third-party apps cannot sign up at all and login codes arrive only via Telegram (Telethon #4050); multiple 2023-2025 reports of forced logout from all devices ~10 s after starting Telethon (#4051, #4516) with anecdotal mitigation of realistic device_model/system_version/app_version, and the maintainer stating Telegram fingerprints abused libraries and bans are "Telegram's decision"; new virtual-number accounts were banned within a day (#3955). Sessions: AUTH_KEY_DUPLICATED (406) invalidates the auth key when "an authorized session is sending requests in parallel from two separate TCP connections" (core errors doc) / "used under two different IP addresses simultaneously" (Telethon #1488; a Mar-2025 comment hit it running a session in GitHub Actions); mtcute: "you can't log in with the same session string from multiple IPs at once, and that would immediately revoke that session... impractical for distributed systems with changing IPs"; MTKruto: "An auth string must only be used from a single network and only through a single connection. It will otherwise get invalidated." GitHub-hosted runners are Azure with IP ranges refreshed weekly, schedule min 5 min with delays/dropped jobs, 6-h job cap, scheduled workflows disabled after 60 days inactivity in public repos, and GitHub's Actions terms forbid "any other activity unrelated to the production, testing, deployment, or publication of the software project" (a 2022 blog notes GitHub removed userbot-hosting repos). Vercel Hobby cron is once/day with ±59 min precision (Pro: per-minute). Library status (Sept 2026): Telethon GitHub archived 21 Feb 2026, moved to Codeberg, v1.44.0 (15 Jun 2026) "maintenance mode", v2 still 2.0.0a0; Pyrogram archived 23 Dec 2024; Kurigram 2.2.25 (21 Aug 2026, pushed 8 Sep 2026, 813★); Pyrofork 2.3.69 (Dec 2025); GramJS archived 14 Jul 2026, npm `telegram` 2.26.22 (Feb 2025) deprecated in favour of `teleproto` 1.229.0 (25 Aug 2026, ~31.7k weekly downloads, StringSession-compatible); mtcute 0.32.1 (30 Aug 2026, 554★, ~15.9k weekly for @mtcute/node, exportSession() string, Node/Bun/Deno/web); MTKruto 0.217.0 (25 Aug 2026, 173★, 340 weekly, pre-1.0, auth strings, no Workers mention); tdl 8.1.0 (Mar 2026, ~45k weekly, prebuilt-tdlib incl. Windows) but TDLib needs a filesystem database directory (no string session).
+
+## Findings
+- [high] UserStatus constructors: userStatusEmpty (status not set), userStatusOnline{expires:int} = 'Time to expiration of the current online status', userStatusOffline{was_online:int} = 'Time the user was last seen online', userStatusRecently/LastWeek/LastMonth{flags, by_me:flags.0?true}. All timestamps are unix seconds; no documented rounding for exact statuses.
+  - notes: Telegram Desktop maps userStatusOnline.expires and userStatusOffline.was_online onto one 'OnlineTill(T)' value (LastseenFromMTP in data_user.cpp): T>now means online until T, T<=now means last seen at T. TDLib logs an error if expires is >1 day in the past and clamps was_online from the future to now-1.
+  - src: https://core.telegram.org/type/UserStatus
+  - src: https://core.telegram.org/constructor/userStatusOnline
+  - src: https://core.telegram.org/constructor/userStatusOffline
+  - src: https://core.telegram.org/constructor/userStatusRecently
+  - src: https://core.telegram.org/tdlib/docs/classtd_1_1td__api_1_1user_status_online.html
+  - src: https://core.telegram.org/tdlib/docs/classtd_1_1td__api_1_1user_status_offline.html
+- [high] The by_me flag on userStatusRecently/LastWeek/LastMonth means the exact status is hidden from the observer because the OBSERVER hid their own last seen and lacks Premium (TDLib: 'Exact user's status is hidden because the current user enabled userPrivacySettingShowStatus privacy setting for the user and has no Telegram Premium'). Observer accounts must therefore share their own last seen (or be Premium) to get exact timestamps.
+  - notes: Blog Jan 31 2024: Premium can hide own last seen/read time and still see others who share theirs; 'If you hide your last seen or read time, it is always hidden from all users – including Premium users'. Reciprocity rule since 2014: 'you won't see Last Seen timestamps for people with whom you don't share your own'.
+  - src: https://core.telegram.org/constructor/userStatusRecently
+  - src: https://core.telegram.org/tdlib/docs/classtd_1_1td__api_1_1user_status_recently.html
+  - src: https://telegram.org/blog/privacy-revolution
+  - src: https://telegram.org/blog/new-saved-messages-and-9-more
+  - src: https://bugs.telegram.org/c/52882
+- [high] With Last Seen = Everybody, any authorized user session (contact or not) that itself shares last seen receives the exact was_online/expires timestamp; approximate buckets only apply when hidden: recently = 1 s to 2-3 days, within a week = 2-3 to 7 days, within a month = 6-7 days to a month, long time ago = > 1 month.
+  - notes: Bucket boundaries are from the official FAQ.
+  - src: https://telegram.org/faq
+  - src: https://telegram.org/blog/privacy-revolution
+- [medium] No evidence of a 2024-2026 change to the default Last Seen setting; the only source found asserting the default is 'Everybody' is HowToGeek ('By default, Telegram shows anyone and everyone the last time you were online'). Official docs opened (FAQ, api/privacy) do not state the default.
+  - notes: The 2024 change was about Read Time and Premium one-way visibility, not the default. The developer can verify their own setting in Settings > Privacy and Security > Last Seen & Online.
+  - src: https://www.howtogeek.com/710383/how-to-hide-your-last-seen-online-time-in-telegram/
+  - src: https://telegram.org/faq
+  - src: https://core.telegram.org/api/privacy
+- [high] Online presence is set explicitly via account.updateStatus(offline:Bool) ('Updates online user status'; users only). Official clients send offline=false only while a window is active and the user was non-idle within offline_idle_timeout, re-sending every online_update_period, and send offline=true when idle/closing. Defaults compiled into Telegram Desktop: onlineUpdatePeriod=120000 ms, offlineBlurTimeout=5000, offlineIdleTimeout=30000, onlineCloudTimeout=300000, notifyCloudDelay=30000.
+  - notes: api_updates.cpp Updates::updateOnline(): isOnline = hasActiveWindow && idle < offlineIdleTimeout; sends MTPaccount_UpdateStatus(!isOnline) when state changes or every onlineUpdatePeriod; locally marks self OnlineTill(now + onlineUpdatePeriod/1000). Server-side expiry is likely online_cloud_timeout (300 s) after the last updateStatus(false) — inferred, not documented.
+  - src: https://core.telegram.org/method/account.updateStatus
+  - src: https://raw.githubusercontent.com/telegramdesktop/tdesktop/dev/Telegram/SourceFiles/mtproto/mtproto_config.h
+  - src: https://raw.githubusercontent.com/telegramdesktop/tdesktop/dev/Telegram/SourceFiles/api/api_updates.cpp
+  - src: https://core.telegram.org/api/config
+- [high] TDLib does not mark the account online unless the app sets option 'online' (Boolean, writable, default false); when set it sends account.updateStatus(false) and repeats every online_update_period_ms (TDLib default 210000 ms), locally assuming online lasts unix_time+300 s. TDLib maintainer: set 'online' once via setOption; it is 'useless to set an option to its current value'.
+  - notes: OnlineManager::on_online_updated only sends UpdateStatusQuery when is_online_ (or forced); set_my_online_status uses new_online = unix_time + 300 when online, unix_time - 1 when offline.
+  - src: https://core.telegram.org/tdlib/options
+  - src: https://github.com/tdlib/td/issues/714
+  - src: https://github.com/tdlib/td/issues/1005
+  - src: https://raw.githubusercontent.com/tdlib/td/master/td/telegram/OnlineManager.cpp
+  - src: https://raw.githubusercontent.com/tdlib/td/master/td/telegram/UserManager.cpp
+- [medium] A userbot that merely connects and makes read calls (e.g. users.getUsers) should NOT appear online: the Telethon maintainer reported that joining channels and sending messages did not make the account online and that status 'can always be set manually' via account.updateStatus; mtcute's FAQ tells users to 'call setOffline(false) periodically to tell Telegram that you are online'. Caveat: Lonami also said 'Some requests update it, some don't' without listing them, so the exact call set must be verified empirically.
+  - notes: Issue #328 (2017-2023): 'it's strange Telegram doesn't set online for you when you send a message. But that's just the way it works'. No issue found in Telethon/Pyrogram/GramJS/mtcute trackers complaining that a passive client appears online. Recommendation: never invoke account.updateStatus(offline=false); optionally call updateStatus(offline=true) is unnecessary and could itself rewrite was_online for the own account — avoid it too.
+  - src: https://github.com/LonamiWebs/Telethon/issues/328
+  - src: https://mtcute.dev/guide/intro/faq
+  - src: https://github.com/LonamiWebs/Telethon/issues/3177
+  - src: https://docs.pyrogram.org/telegram/functions/account/update-status
+- [medium] A session CAN read its own status and it reflects other devices: TDLib's UserManager stores the own user's status from updateUserStatus ('only update was_online_remote_ from updateUserStatus') and NotificationManager delays notifications when 'we are offline, but online from some other client'; UserManager::on_update_user_online handles user_id == get_my_id() from users.getUsers responses too. The gentoo-root/telegram-tracker Telethon poller documents 'me' as a valid tracking target.
+  - notes: TDLib guards '!(new_online < 0 && user_id == get_my_id())', i.e. it ignores approximate statuses for self, implying the server returns exact values for inputUserSelf. tdesktop uses MTP_inputUserSelf for the self user. Not verified by a direct experiment in this research; do a 1-hour A/B test comparing phone foreground use with users.getUsers([inputUserSelf]).status.
+  - src: https://raw.githubusercontent.com/tdlib/td/master/td/telegram/UserManager.cpp
+  - src: https://raw.githubusercontent.com/tdlib/td/master/td/telegram/NotificationManager.cpp
+  - src: https://github.com/gentoo-root/telegram-tracker
+  - src: https://raw.githubusercontent.com/telegramdesktop/tdesktop/dev/Telegram/SourceFiles/data/data_user.cpp
+- [medium] updateUserStatus is documented only as 'Contact status update'; official docs additionally require clients to call contacts.getStatuses ('online statuses of all contacts with an accessible Telegram account') every 70000-100000 s (randomised) to refresh contacts' status, and the TDLib maintainer (Feb 2025) states 'It is impossible to know exact status of all other Telegram users... The information is updated whenever needed and updates are sent after that.' No official statement about non-contacts; push should be treated as best-effort.
+  - notes: GramJS #498 (2023): user did not receive status changes for some contacts with public status. TDLib #1215: updates about a user are sent 'when it is needed by the app to show the correct data'. For the OWN account TDLib evidence shows the server does push updateUserStatus (see previous finding). Evidence conflicts with the naive assumption that a raw listener gets every transition; polling remains necessary for correctness.
+  - src: https://core.telegram.org/constructor/updateUserStatus
+  - src: https://core.telegram.org/api/peers
+  - src: https://core.telegram.org/api/contacts
+  - src: https://core.telegram.org/method/contacts.getStatuses
+  - src: https://github.com/tdlib/td/issues/3258
+  - src: https://github.com/tdlib/td/issues/1215
+  - src: https://github.com/gram-js/gramjs/issues/498
+- [high] Long-running listeners need keepalive and gap recovery: TDLib pings the server with updates.getState every ~300 s (PING_SERVER_TIMEOUT=300, randomised +0-20%); Telethon v1 runs a 60-s keepalive ping loop and calls updates.getDifference on gaps/timeouts ('Timeout waiting for updates expired'), yet issue #4622 (May 2025) shows the v1 client can stall until process restart. Clients must handle updatesTooLong by calling updates.getDifference and repeat on differenceSlice.
+  - notes: Telethon exposes catch_up=True and client.catch_up(); receive_updates=False disables update delivery entirely (useful for a pure poller). Telethon #4690 shows a corrupted session date causing GapError until re-login.
+  - src: https://raw.githubusercontent.com/tdlib/td/master/td/telegram/OnlineManager.h
+  - src: https://raw.githubusercontent.com/tdlib/td/master/td/telegram/UpdatesManager.cpp
+  - src: https://raw.githubusercontent.com/LonamiWebs/Telethon/v1/telethon/client/updates.py
+  - src: https://github.com/LonamiWebs/Telethon/issues/4622
+  - src: https://core.telegram.org/api/updates
+  - src: https://docs.telethon.dev/en/stable/concepts/updates.html
+- [high] Bot API cannot see online status: the Bot API User object has no status/last-seen/presence field and there is no presence method; TDLib discards updateUserStatus in bot mode; community trackers require user-account credentials because 'bot accounts lack the necessary access'.
+  - notes: users.getUsers is callable by bots too, but bots receive no meaningful UserStatus.
+  - src: https://core.telegram.org/bots/api
+  - src: https://raw.githubusercontent.com/tdlib/td/master/td/telegram/UserManager.cpp
+  - src: https://github.com/serga-kiev/telegram-status-monitor
+- [medium] users.getUsers documents no FLOOD errors; the documented heavy penalty is username resolution (contacts.resolveUsername / get_entity by username), which yielded 24-h FloodWaits even when called every 4 minutes. Poll by input entity (inputUserSelf or cached id+access_hash), never by username. Prior trackers polled every 15 s (Telethon) and 10 s (TDLib) without reported floods; Telethon docs: limits are unknown, 'Don't spam'; Telethon auto-sleeps FloodWait < 60 s.
+  - notes: A 60-s (or even 30-s) users.getUsers([inputUserSelf]) poll on one long-lived connection is very likely safe; a 5-min poll is comfortably safe but loses resolution (online transitions are only detectable at poll time; offline transitions carry exact was_online). Handle FLOOD_WAIT_X by sleeping X seconds.
+  - src: https://core.telegram.org/method/users.getUsers
+  - src: https://github.com/LonamiWebs/Telethon/issues/494
+  - src: https://github.com/LonamiWebs/Telethon/issues/3987
+  - src: https://docs.telethon.dev/en/stable/concepts/errors.html
+  - src: https://github.com/gentoo-root/telegram-tracker
+  - src: https://github.com/tdlib/td/issues/3258
+  - src: https://core.telegram.org/api/errors
+- [medium] Account-ban/lockout risk is real but mostly tied to new/virtual-number accounts and spam-like behaviour: Telethon FAQ recommends using only 'well-established accounts (and not an account you just created)' and avoiding VoIP numbers; 4 new virtual-number accounts were banned within a day (#3955); mtcute FAQ: accounts created via unofficial clients are 'automatically put under observation' (moot since Feb 2023 when sign-up via third-party apps was disabled and login codes became Telegram-only, #4050). Multiple 2023-2025 reports describe forced logout from ALL devices ~10 s after starting Telethon (#4051, #4516); the maintainer attributes it to Telegram fingerprinting abused libraries; anecdotal mitigation: realistic device_model/system_version/app_version.
+  - notes: Telegram API ToS prohibits 'preventing last seen and online statuses from being displayed correctly' (aimed at clients that fake status) but says nothing against read-only automation on your own account. A fresh secondary account is strictly riskier than the developer's old account; if a second observer is needed, use a real SIM number, register in the official app, and let it age before using it via MTProto.
+  - src: https://docs.telethon.dev/en/stable/quick-references/faq.html
+  - src: https://docs.telethon.dev/en/v2/developing/faq.html
+  - src: https://github.com/LonamiWebs/Telethon/issues/3955
+  - src: https://github.com/LonamiWebs/Telethon/issues/3861
+  - src: https://github.com/LonamiWebs/Telethon/issues/4050
+  - src: https://github.com/LonamiWebs/Telethon/issues/4051
+  - src: https://github.com/LonamiWebs/Telethon/issues/4516
+  - src: https://github.com/LonamiWebs/Telethon/issues/824
+  - src: https://mtcute.dev/guide/intro/faq
+  - src: https://core.telegram.org/api/terms
+- [high] One auth key must not be used concurrently from two connections/IPs: AUTH_KEY_DUPLICATED (406) fires when 'an authorized session is sending requests in parallel from two separate TCP connections' and invalidates the key (forcing re-login). mtcute: 'you can't log in with the same session string from multiple IPs at once, and that would immediately revoke that session' (calls session strings 'impractical for distributed systems with changing IPs'); MTKruto: 'An auth string must only be used from a single network and only through a single connection. It will otherwise get invalidated'; a Telethon user hit AuthKeyDuplicatedError running a session file in GitHub Actions (Mar 2025).
+  - notes: Conflict: Telegram's own text says 'in parallel'; mtcute/MTKruto imply changing networks alone is dangerous. Strictly sequential runs from GitHub Actions (each on a new Azure IP) may work but the risk of the key being revoked mid-way is documented by library authors; keep one process on one stable IP. Other relevant errors: AUTH_KEY_UNREGISTERED 'The key is not registered in the system' (session terminated/revoked or wrong DC), SESSION_REVOKED 'authorization has been invalidated, because of the user terminating all sessions', USER_DEACTIVATED_BAN = banned (mtcute FAQ).
+  - src: https://core.telegram.org/api/errors
+  - src: https://github.com/LonamiWebs/Telethon/issues/1488
+  - src: https://github.com/mautrix/telegram/issues/408
+  - src: https://github.com/tdlib/td/issues/353
+  - src: https://mtcute.dev/guide/topics/storage
+  - src: https://mtkru.to/auth-strings
+  - src: https://docs.telethon.dev/en/stable/concepts/sessions.html
+- [medium] New logins produce updateNewAuthorization on other sessions; if the 'unconfirmed' flag is set, clients show a 'do you recognize this session' notification, and the session auto-confirms after authorization_autoconfirm_period unless rejected via account.resetAuthorization. A single persisted StringSession is one authorization; notifications are per new authorization, not per IP change.
+  - notes: IP changes on the same key do not create a new authorization, but see AUTH_KEY_DUPLICATED risk above.
+  - src: https://core.telegram.org/api/auth
+- [high] GitHub Actions is a poor host for the MTProto collector: hosted runners run in Azure with IP ranges that change weekly; schedule is min 5 min, 'can be delayed during periods of high loads' and 'some queued jobs may be dropped'; jobs are capped at 6 h; scheduled workflows in public repos are disabled after 60 days without activity; and GitHub's Actions terms prohibit 'any other activity unrelated to the production, testing, deployment, or publication of the software project' (a 2022 post reports GitHub removing userbot-hosting repos).
+  - notes: Even ignoring ToS, 5-min polling gives at best 5-min resolution on online transitions and each run is a fresh TCP session from a new datacenter IP. Vercel cron on Hobby is once per day with ±59 min precision (Pro: per minute), so Vercel cannot host the poller on the free plan either.
+  - src: https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+  - src: https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+  - src: https://docs.github.com/en/actions/reference/limits
+  - src: https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features#actions
+  - src: http://scirex.me/bits/deploy-userbot-with-github-action/
+- [high] Library landscape (checked 2026-09-08): Telethon GitHub repo archived 2026-02-21 and moved to codeberg.org/Lonami/Telethon; v1.44.0 released 2026-06-15, 'v1 is for the most part in maintenance mode', v2 remains 2.0.0a0 alpha. Pyrogram archived 2024-12-23 (last release 2.0.106, 2023-04-30). Kurigram 2.2.25 (2026-08-21, repo pushed 2026-09-08, 813 stars) and Pyrofork 2.3.69 (2025-12-10, 290 stars) are the maintained Pyrogram forks.
+  - notes: PyPI JSON: Telethon 1.44.0 2026-06-15; kurigram 2.2.25 2026-08-21 (py>=3.8); pyrofork 2.3.69 2025-12-10 (py~=3.10); Pyrogram 2.0.106 2023-04-30.
+  - src: https://github.com/LonamiWebs/Telethon
+  - src: https://codeberg.org/Lonami/Telethon
+  - src: https://pypi.org/project/Telethon/
+  - src: https://docs.telethon.dev/en/stable/misc/changelog.html
+  - src: https://github.com/pyrogram/pyrogram
+  - src: https://github.com/KurimuzonAkuma/kurigram
+  - src: https://pypi.org/project/kurigram/
+- [high] JS/TS landscape: GramJS repo archived 2026-07-14 and npm 'telegram' (2.26.22, 2025-02-12, ~198k weekly) carries a deprecation notice pointing to 'teleproto' (1.229.0, 2026-08-25, ~31.7k weekly, 306 stars), which loads existing 352-char GramJS/Telethon StringSessions. mtcute 0.32.1 (2026-08-30, 554 stars, @mtcute/node ~15.9k weekly) supports Node/Bun/Deno/web, SQLite/Postgres/IndexedDB storage and exportSession()/importSession() ~400-char strings. MTKruto 0.217.0 (2026-08-25, 173 stars, 340 weekly) is pre-1.0 ('do not recommend depending on it for critical projects'), supports Node/Deno/Bun/browsers with Memory/Deno KV/IndexedDB storage and auth strings; no Cloudflare Workers support documented. tdl 8.1.0 (2026-03-10, ~45k weekly) + prebuilt-tdlib (2026-08-26, Windows x64 included) wraps TDLib but requires a filesystem databaseDirectory (no string session).
+  - notes: Version/download numbers come from registry.npmjs.org and api.npmjs.org queried 2026-09-08. mtcute exposes a typed UserStatusUpdate (userId, status, lastOnline, nextOffline) and setOffline(); teleproto exposes raw Api.UpdateUserStatus via addEventHandler like GramJS.
+  - src: https://github.com/gram-js/gramjs
+  - src: https://api.github.com/repos/gram-js/gramjs
+  - src: https://docs.teleproto.dev/migrating-from-gramjs
+  - src: https://github.com/mtcute/mtcute
+  - src: https://mtcute.dev/guide/topics/storage
+  - src: https://ref.mtcute.dev/classes/_mtcute_core.index.UserStatusUpdate.html
+  - src: https://github.com/MTKruto/MTKruto
+  - src: https://mtkru.to/
+  - src: https://mtkru.to/auth-strings
+  - src: https://github.com/eilvelia/tdl
+
+## Candidates
+- **mtcute (@mtcute/node)** (npm) https://github.com/mtcute/mtcute
+  - approach: TypeScript MTProto 2.0 client; TelegramClient with SQLite storage on Node, exportSession()/importSession() string sessions, typed UserStatusUpdate handler, setOffline() to control presence, catchUp option
+  - fit: yes - actively maintained, string session for secrets, typed status updates, never sends updateStatus unless you call setOffline(false)
+  - language_or_stack: TypeScript (Node 18+/Bun/Deno/web)
+  - maintained: v0.32.1 published 2026-08-30; repo pushed 2026-08-30
+  - popularity: 554 stars; ~15.9k weekly downloads (@mtcute/node), ~27.7k (@mtcute/core)
+  - notes: FAQ warns bans come from abuse and that a session string used from multiple IPs at once is revoked; smaller community than GramJS lineage.
+- **teleproto (GramJS successor)** (npm) https://www.npmjs.com/package/teleproto
+  - approach: Fork of GramJS (Telethon port) with StringSession, client.addEventHandler for raw Api.UpdateUserStatus, client.invoke(new Api.users.GetUsers({id:[new Api.InputUserSelf()]}))
+  - fit: yes - drop-in for GramJS code/tutorials, loads existing GramJS/Telethon string sessions
+  - language_or_stack: TypeScript/Node
+  - maintained: v1.229.0 published 2026-08-25 (layer 229); forked from GramJS in 2025
+  - popularity: 306 stars; ~31.7k weekly downloads
+  - notes: GramJS itself is archived (2026-07-14) and npm 'telegram' is deprecated with a pointer to teleproto.
+- **GramJS (npm 'telegram')** (npm) https://github.com/gram-js/gramjs
+  - approach: Original Node/browser MTProto client based on Telethon
+  - fit: no - archived; deprecated on npm
+  - language_or_stack: TypeScript/Node
+  - maintained: Archived 2026-07-14; last npm release 2.26.22 on 2025-02-12
+  - popularity: 1.76k stars; ~198k weekly downloads (legacy)
+  - notes: Use teleproto instead.
+- **MTKruto** (npm) https://github.com/MTKruto/MTKruto
+  - approach: Cross-runtime (Node/Deno/Bun/browser) client with its own high-level API, auth strings, Memory/Deno KV/IndexedDB storage adapters
+  - fit: partial - works but pre-1.0 ('do not recommend depending on it for critical projects'); auth string 'must only be used from a single network and only through a single connection'
+  - language_or_stack: TypeScript
+  - maintained: v0.217.0 published 2026-08-25
+  - popularity: 173 stars; ~340 weekly downloads
+  - notes: No Cloudflare Workers support documented on the site or README.
+- **tdl + prebuilt-tdlib** (npm) https://github.com/eilvelia/tdl
+  - approach: Node bindings to TDLib; TDLib manages updates/gaps and only reports online if option 'online' is set (default false); status via getUser/updateUserStatus
+  - fit: partial - robust update handling and safe presence semantics, but needs a persistent database directory (no string session) and native binary; fine on a VPS, awkward on GitHub Actions
+  - language_or_stack: JavaScript/Node + native TDLib
+  - maintained: tdl 8.1.0 2026-03-10; prebuilt-tdlib 2026-08-26
+  - popularity: 535 stars; ~45k weekly downloads (tdl), ~54k (prebuilt-tdlib)
+  - notes: TDLib caches user status and its maintainer says exact real-time presence for arbitrary users is not guaranteed (tdlib/td#3258); own status is tracked from updateUserStatus.
+- **Telethon** (pypi) https://codeberg.org/Lonami/Telethon
+  - approach: Python MTProto client; StringSession; events.UserUpdate / events.Raw for UpdateUserStatus; client.get_me() / GetUsersRequest([InputUserSelf()])
+  - fit: yes (Python) - mature, string sessions, receive_updates/catch_up flags; but maintenance-mode and the most fingerprinted library (forced-logout reports)
+  - language_or_stack: Python >=3.5
+  - maintained: v1.44.0 2026-06-15; GitHub archived 2026-02-21, moved to Codeberg (last commit 2026-08-25); v2 still alpha
+  - popularity: 12.1k GitHub stars
+  - notes: FAQ: use well-established accounts, avoid VoIP numbers; issues #4051/#4516 report logout-from-all-devices; many users set realistic device_model/system_version.
+- **Kurigram (Pyrogram fork)** (pypi) https://github.com/KurimuzonAkuma/kurigram
+  - approach: Drop-in Pyrogram replacement; in-memory storage with session_string; raw invoke(functions.account.UpdateStatus) available but not required
+  - fit: yes (Python) - actively maintained alternative to archived Pyrogram
+  - language_or_stack: Python >=3.8
+  - maintained: 2.2.25 released 2026-08-21; repo pushed 2026-09-08
+  - popularity: 813 stars
+  - notes: Pyrogram itself archived 2024-12-23; Pyrofork (290 stars, 2.3.69 Dec 2025) is the other fork.
+- **GitHub Actions (hosted runners) as collector host** (hosting-provider) https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+  - approach: cron schedule runs a job that logs in with a StringSession secret and polls once
+  - fit: no - min 5-min interval with delays/dropped jobs, new Azure IP every run (AUTH_KEY_DUPLICATED risk per mtcute/MTKruto docs and a Telethon report), 60-day inactivity auto-disable, and Actions ToS forbids activity unrelated to building/testing/deploying the project
+  - language_or_stack: any
+  - maintained: n/a
+  - popularity: n/a
+  - notes: If used anyway: one job at a time (concurrency group), receive_updates=false, poll users.getUsers([inputUserSelf]) once, never call updateStatus, expect occasional AUTH_KEY_* failures requiring re-login.
+- **Vercel Cron Jobs as collector host** (hosting-provider) https://vercel.com/docs/cron-jobs/usage-and-pricing
+  - approach: cron-triggered serverless function
+  - fit: no on Hobby (once per day, ±59 min); partial on Pro (per-minute) but each invocation is a new TCP session from datacenter IPs
+  - language_or_stack: Next.js/Node
+  - maintained: docs updated 2026-07-15
+  - popularity: n/a
+  - notes: Keep Vercel for the dashboard only; store samples in an external DB.
+- **Tiny always-on VPS / home machine (single stable IP)** (hosting-provider) https://mtcute.dev/guide/topics/storage
+  - approach: one long-lived MTProto process with SQLite session storage, polling own status every 30-60 s and listening to updateUserStatus
+  - fit: yes - avoids IP churn and concurrent-session revocation; matches library authors' guidance to persist storage on a single host
+  - language_or_stack: Node (mtcute/teleproto) or Python
+  - maintained: n/a
+  - popularity: n/a
+  - notes: Datacenter IPs are cited anecdotally as a ban factor in community threads, but no official evidence; an old established account doing read-only polling has the lowest risk profile.
+
+## Recommendation
+Build the collector as ONE long-running process on a single stable IP (tiny VPS or an always-on home box), not as GitHub Actions cron and not as Vercel cron. Use mtcute (@mtcute/node) if you want the best-maintained typed TS client with string sessions and a typed UserStatusUpdate, or teleproto if you prefer the GramJS/Telethon-style API and larger community; both are actively released (Aug 2026) and both load a string session from an env var. Generate the session ONCE interactively on your PC (login code arrives in Telegram, not SMS), then use it only from that one host and never from two places at once (AUTH_KEY_DUPLICATED revokes the key). Track your OWN account from your own session: do not call account.updateStatus(offline=false) (or setOffline(false)), poll users.getUsers([inputUserSelf]) every 30-60 s (no username resolution, so FLOOD risk is minimal), and additionally subscribe to updateUserStatus for your own user id as a bonus signal; record both userStatusOnline.expires and userStatusOffline.was_online with your own receive timestamp. Validate in the first hour that using the phone flips the polled status to online and that your poller alone never does (compare with a friend's view of your profile); if the poller is found to make you appear online, fall back to a second, OLD, real-SIM observer account that also keeps Last Seen = Everybody (otherwise it only gets 'recently' via by_me). Handle reconnects with catchUp/getDifference and restart the process on update-loop stalls. Keep Vercel for the Next.js dashboard reading from an external DB. Set realistic device_model/system_version/app_version in the client init, use an established account, and avoid any write operations from the collector.
+
+## Open questions
+- Exact server-side value of userStatusOnline.expires as seen by other users after the last account.updateStatus(false): official clients re-send every 120-210 s and tdesktop's onlineCloudTimeout default is 300 s, but the server-side expiry is not documented; measure it empirically.
+- When an online status simply expires (no explicit updateStatus(true)), what was_online does the server report - the expiry time or the last updateStatus time? Not documented; affects session-length statistics.
+- Lonami's 'Some requests update it, some don't' (Telethon #328) is unspecified: verify empirically that the exact set of calls used by the collector (initial connection/initConnection, users.getUsers, updates.getState/getDifference) never sets the account online.
+- Does users.getUsers([inputUserSelf]) return userStatusOnline while another device is active, or does the server special-case self? TDLib code strongly implies exact self status is returned and pushed, but no direct experiment was found.
+- Are updateUserStatus pushes for the OWN account delivered reliably (TDLib relies on them for notification delay), and what is their latency versus polling?
+- Whether strictly sequential use of one auth key from changing IPs (GitHub Actions) triggers AUTH_KEY_DUPLICATED: Telegram's doc says 'in parallel', mtcute/MTKruto docs say changing networks alone can invalidate the session, and one user reported it in Actions; unresolved conflict.
+- Whether Telegram's Last Seen default for accounts created in 2025-2026 is still 'Everybody' (no official source found; only HowToGeek).
+- Whether logging in from a datacenter IP (VPS) measurably raises restriction/logout risk for an old account doing read-only polling; only anecdotal community claims were found.
