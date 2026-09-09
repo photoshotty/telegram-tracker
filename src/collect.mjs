@@ -1,13 +1,17 @@
 // Poll the presence of every tracked Telegram user once and append one sample per user
-// to data/<token>/YYYY-MM.jsonl, where <token> = HMAC(TG_DATA_KEY, user id).
+// to <DATA_DIR>/<token>/YYYY-MM.jsonl, where <token> = HMAC(TG_DATA_KEY, user id).
 // Read-only: never calls account.updateStatus.
+//
+// DATA_DIR defaults to data/ inside GitHub Actions and data-local/ (gitignored) elsewhere,
+// so a local test poll never edits files the Action commits.
 //
 // Who gets polled:
 //   - always the logged-in account itself (InputUserSelf)
 //   - every username listed in TG_TARGETS (JSON array), which lives in a GitHub secret.
-// Usernames are resolved once and cached in data/targets.cache.enc (AES-GCM, TG_DATA_KEY),
-// keyed by SHA-256 of the username. Access hashes are bound to the login session, so the
-// cache is discarded when TG_SESSION changes.
+// Usernames are resolved once and cached in <DATA_DIR>/targets.cache.enc (AES-GCM, TG_DATA_KEY),
+// keyed by SHA-256 of the username. Names that do not resolve are remembered for 24 h and
+// a FLOOD_WAIT pauses all resolution until it expires. Access hashes are bound to the login
+// session, so the cache is discarded when TG_SESSION changes.
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -22,9 +26,10 @@ if (!TG_API_ID || !TG_API_HASH || !TG_SESSION) {
 }
 const DATA_KEY = requireKey();
 
-const DATA_DIR = path.resolve(process.env.DATA_DIR ?? "data");
+const DATA_DIR = path.resolve(process.env.DATA_DIR ?? (process.env.GITHUB_ACTIONS ? "data" : "data-local"));
 const CACHE_FILE = path.join(DATA_DIR, "targets.cache.enc");
 const RESOLVE_DELAY_MS = 1500; // be gentle with contacts.resolveUsername
+const RETRY_FAILED_MS = 24 * 60 * 60 * 1000;
 
 const sha = (s) => createHash("sha256").update(s).digest("hex");
 const sessionKey = sha(TG_SESSION).slice(0, 12);
@@ -75,23 +80,44 @@ async function saveCache(cache) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const resolved = (cache, u) => cache.entries[sha(u)]?.hash;
 
+// Logs never contain usernames or ids: only the position in TG_TARGETS and the folder token.
 async function resolveMissing(client, cache, usernames) {
   let changed = false;
-  for (const u of usernames) {
+  if (cache.floodUntil && Date.now() < cache.floodUntil) {
+    console.log(`username resolution paused until ${new Date(cache.floodUntil).toISOString()} (flood wait)`);
+    return;
+  }
+  for (let i = 0; i < usernames.length; i++) {
+    const u = usernames[i];
     const key = sha(u);
-    if (cache.entries[key]) continue;
+    const e = cache.entries[key];
+    if (e?.hash) continue;
+    if (e?.failed && Date.now() - e.at < RETRY_FAILED_MS) continue;
     try {
       const res = await client.invoke(new Api.contacts.ResolveUsername({ username: u }));
       const user = res.users.find((x) => x.className === "User");
       if (!user) throw new Error("not a user");
       cache.entries[key] = { id: user.id.toString(), hash: user.accessHash.toString() };
       changed = true;
-      console.log(`resolved a new target -> ${tokenFor(DATA_KEY, user.id.toString())}`);
-    } catch (e) {
-      const msg = e?.errorMessage ?? e?.message ?? String(e);
-      console.error(`could not resolve a target (${msg}); will retry next run`);
-      if (msg.startsWith("FLOOD_WAIT")) break;
+      console.log(`resolved target #${i} -> ${tokenFor(DATA_KEY, user.id.toString())}`);
+    } catch (err) {
+      const msg = err?.errorMessage ?? err?.message ?? String(err);
+      if (msg.startsWith("FLOOD_WAIT")) {
+        const secs = Number(err?.seconds) || Number(msg.split("_").pop()) || 3600;
+        cache.floodUntil = Date.now() + secs * 1000;
+        changed = true;
+        console.error(`flood wait ${secs}s from Telegram; pausing username resolution`);
+        break;
+      }
+      if (/USERNAME_NOT_OCCUPIED|USERNAME_INVALID|not a user/.test(msg)) {
+        cache.entries[key] = { failed: msg, at: Date.now() };
+        changed = true;
+        console.error(`target #${i} cannot be resolved (${msg}); will retry in 24h`);
+      } else {
+        console.error(`target #${i}: ${msg}; will retry next run`);
+      }
     }
     await sleep(RESOLVE_DELAY_MS);
   }
@@ -110,7 +136,6 @@ async function writeSample(token, sample) {
   await mkdir(dir, { recursive: true });
   const month = new Date(sample.t * 1000).toISOString().slice(0, 7);
   await appendFile(path.join(dir, `${month}.jsonl`), JSON.stringify(sample) + "\n");
-  await writeFile(path.join(dir, "latest.json"), JSON.stringify(sample, null, 2) + "\n");
 }
 
 async function main() {
@@ -134,10 +159,19 @@ async function main() {
     const inputs = [new Api.InputUserSelf()];
     for (const u of usernames) {
       const e = cache.entries[sha(u)];
-      if (e) inputs.push(new Api.InputUser({ userId: BigInt(e.id), accessHash: BigInt(e.hash) }));
+      if (e?.hash) inputs.push(new Api.InputUser({ userId: BigInt(e.id), accessHash: BigInt(e.hash) }));
     }
 
-    const users = await client.invoke(new Api.users.GetUsers({ id: inputs }));
+    let users;
+    try {
+      users = await client.invoke(new Api.users.GetUsers({ id: inputs }));
+    } catch (err) {
+      // One stale access hash must not stop everyone: fall back to polling the account itself.
+      const msg = err?.errorMessage ?? err?.message ?? String(err);
+      console.error(`users.getUsers failed for the target list (${msg}); polling self only this run`);
+      users = await client.invoke(new Api.users.GetUsers({ id: [new Api.InputUserSelf()] }));
+    }
+
     const t = Math.floor(Date.now() / 1000);
     let written = 0;
     for (const user of users) {
@@ -146,10 +180,10 @@ async function main() {
       const sample = { t, ...normalize(user.status), src: "poll" };
       await writeSample(token, sample);
       written += 1;
-      console.log(`[${new Date(t * 1000).toISOString()}] ${user.self ? "me" : token} ${describe(sample)}`);
+      console.log(`[${new Date(t * 1000).toISOString()}] ${token} ${describe(sample)}`);
     }
-    const pending = usernames.filter((u) => !cache.entries[sha(u)]).length;
-    console.log(`polled ${written} user(s)${pending ? `, ${pending} target(s) still unresolved` : ""}`);
+    const pending = usernames.filter((u) => !resolved(cache, u)).length;
+    console.log(`polled ${written} user(s) into ${path.relative(process.cwd(), DATA_DIR) || "."}${pending ? `, ${pending} target(s) unresolved` : ""}`);
   } finally {
     await client.disconnect();
   }

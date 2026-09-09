@@ -2,6 +2,25 @@
 
 Logs when tracked Telegram accounts are online / last seen, every 5 minutes, and shows StreamAlert-style analytics (sessions, weekly timetable, time-of-day) in a local dashboard. Read-only: it never sends messages or touches presence. Research and design notes: [RESEARCH.md](RESEARCH.md).
 
+## Daily use
+
+```bash
+npm run dev        # http://localhost:3000
+```
+
+Everything else is a button in the dashboard:
+
+| Button | What it does |
+|---|---|
+| **Show QR code** | Logs this PC into Telegram once (Settings → Devices → Link Desktop Device on the phone). Needed only to look people up when you add them. |
+| **Add** (People panel) | Looks up an @username with the local login, stores name + id in `targets.local.json` on this PC, and pushes the username list to the GitHub secret. |
+| trash icon | Stops tracking someone (their data stays). |
+| **Sync** | Re-pushes the username list and data key to GitHub secrets. |
+| **Poll now** | Triggers the GitHub Action, waits for it, and pulls the new samples. |
+| **Pull latest** | `git pull` the samples the Action committed. The page also pulls by itself at most once a minute. |
+
+New people get their first data on the next Action run (up to 5 minutes, sometimes longer when GitHub's scheduler is busy). Press **Poll now** to skip the wait.
+
 ## How the pieces fit
 
 | Where | What lives there |
@@ -11,51 +30,30 @@ Logs when tracked Telegram accounts are online / last seen, every 5 minutes, and
 | `data/targets.cache.enc` (public) | AES-encrypted cache of resolved access hashes, useless without the key and the CI session |
 | GitHub secrets | `TG_API_ID`, `TG_API_HASH`, `TG_SESSION` (CI login), `TG_TARGETS` (usernames), `TG_DATA_KEY` |
 | `targets.local.json` (local, gitignored) | Your list: usernames, names, notes, numeric ids |
-| `.env` (local, gitignored) | Your local login + the same `TG_DATA_KEY`, so the dashboard can match tokens to names |
-| `web/` | Next.js dashboard, run locally with `npm run dev` |
+| `.env` (local, gitignored) | API keys, your local login, the same `TG_DATA_KEY` |
+| `web/` | Next.js dashboard, local only, bound to 127.0.0.1 |
 
-## Setup
+## One-time setup on a new machine
 
-1. **Privacy check.** People you track must have Settings > Privacy and Security > Last Seen & Online = Everybody. Otherwise Telegram only returns "recently" and no timestamps.
+1. `cp .env.example .env` and fill `TG_API_ID`, `TG_API_HASH` from https://my.telegram.org/apps and the existing `TG_DATA_KEY` (same value as the GitHub secret; never change it, folder names derive from it).
+2. `npm install && npm --prefix web install`
+3. `npm run dev`, press **Show QR code**, scan. Done.
 
-2. **API keys.** https://my.telegram.org/apps . Put `api_id` and `api_hash` into `.env` (copy `.env.example`).
+If you ever need the CLI instead of the dashboard: `npm run login:qr`, `npm run targets -- add @user | remove @user | list | sync | keygen`, `npm run poll` (a local poll writes to `data-local/`, which is gitignored, so it never collides with what the Action commits).
 
-3. **Data key.** `npm run targets -- keygen` and paste the printed line into `.env`. Keep it forever: changing it renames every data folder.
+## Publishing from scratch (already done for photoshotty/telegram-tracker)
 
-4. **Local login (once).** `npm run login:qr`, scan with the Telegram app (Settings > Devices > Link Desktop Device), paste the printed `TG_SESSION=` line into `.env`. This session is only used on your PC.
+```bash
+git init -b main && git add -A && git commit -m "collector"
+gh repo create telegram-tracker --public --source=. --push
+gh secret set TG_API_ID --body "<api_id>"
+gh secret set TG_API_HASH --body "<api_hash>"
+gh secret set TG_SESSION --body "<a session string NOT used anywhere else>"
+npm run targets -- sync      # uploads TG_TARGETS and TG_DATA_KEY
+```
+Then Actions → poll → Run workflow. Public repo matters: private repos would exceed the free Actions minutes.
 
-5. **Test.** `npm run poll` polls your own account and writes `data/<token>/…`. Then `npm run dev` and open http://localhost:3000.
-
-6. **Add people.**
-   ```bash
-   npm run targets -- add @username --name "Alice" --note "friend"
-   npm run targets -- list
-   npm run targets -- remove @username
-   ```
-   `add` resolves the username with your local session and stores id + name locally only.
-
-7. **Publish the collector.**
-   ```bash
-   git add -A && git commit -m "collector"
-   gh repo create telegram-tracker --public --source=. --push
-   ```
-   CI needs its **own** login. Either move the current `.env` session to the secret and log in again locally, or run `npm run login:qr` a second time and use the new string for CI. Never let both places use the same string:
-   ```bash
-   gh secret set TG_API_ID --body "<api_id>"
-   gh secret set TG_API_HASH --body "<api_hash>"
-   gh secret set TG_SESSION --body "<the CI session string>"
-   npm run targets -- sync      # uploads TG_TARGETS and TG_DATA_KEY
-   ```
-   Start it: https://github.com/photoshotty/telegram-tracker/actions/workflows/poll.yml > Run workflow. It then runs every 5 minutes.
-
-8. **Optional: punctual polling.** GitHub's schedule drifts. Add a 5-minute job on https://cron-job.org that POSTs to
-   `https://api.github.com/repos/photoshotty/telegram-tracker/actions/workflows/poll.yml/dispatches`
-   with headers `Authorization: Bearer <token>`, `Accept: application/vnd.github+json` and body `{"ref":"main"}`. Token: https://github.com/settings/personal-access-tokens/new with Actions = Read and write on this repo.
-
-## Daily use
-
-- `npm run dev` for the dashboard. Press **Pull latest** in the header (or `npm run sync`) to fetch what the Action committed.
-- After changing the list: `npm run targets -- sync`. CI resolves new usernames on its next run.
+Optional: GitHub's cron drifts. A 5-minute job on https://cron-job.org that POSTs to `https://api.github.com/repos/photoshotty/telegram-tracker/actions/workflows/poll.yml/dispatches` with `Authorization: Bearer <fine-grained token, Actions read/write>` and body `{"ref":"main"}` keeps it punctual.
 
 ## Data format
 
@@ -75,8 +73,9 @@ Every session **end** is exact (`wo`). Session **starts** are known only to with
 ## Rules that keep the account safe
 
 - One session string is never used from two places at the same time (local vs CI are separate logins).
-- The collector never calls `account.updateStatus` and never resolves usernames repeatedly (cached once).
+- The collector never calls `account.updateStatus` and resolves each username only once (cached, encrypted).
 - Use an established Telegram account, not a fresh virtual number.
+- People who hide their last seen only yield "recently"; the dashboard flags them.
 
 ## Upgrade path
 

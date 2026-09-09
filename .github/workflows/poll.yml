@@ -37,6 +37,8 @@ jobs:
           TG_DATA_KEY: ${{ secrets.TG_DATA_KEY }}
 
       - name: Commit samples
+        # Runs even if the poll step failed so a freshly resolved (encrypted) cache is kept.
+        if: ${{ !cancelled() }}
         run: |
           git config user.name "telegram-tracker[bot]"
           git config user.email "telegram-tracker[bot]@users.noreply.github.com"

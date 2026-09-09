@@ -6,6 +6,7 @@ import { StatCard } from "@/components/stat-card";
 import { Badge, Card, CardBody, CardHeader, EmptyState, LiveDot } from "@/components/ui";
 import { WeeklyTimetable } from "@/components/weekly-timetable";
 import { displayName, loadSamples, loadTargets, serverTimezone } from "@/lib/data";
+import { maybePull } from "@/lib/ops";
 import { computeStats, dailySeries, deriveSessions, hourlyProfile, sessionDuration } from "@/lib/sessions";
 import { formatDateTimeInTz, formatDuration, formatHours, formatTimeAgo, formatTimeInTz } from "@/lib/time";
 
@@ -15,27 +16,30 @@ export default async function UserPage({ params }: { params: Promise<{ id: strin
   const { id: token } = await params;
   if (!/^[0-9a-f]{16}$/.test(token)) notFound();
 
+  await maybePull();
   const targets = await loadTargets();
   const tz = targets.timezone ?? serverTimezone();
   const samples = await loadSamples(token);
   if (samples.length === 0) notFound();
 
   const nowSec = Math.floor(Date.now() / 1000);
-  const derived = deriveSessions(samples);
+  const derived = deriveSessions(samples, nowSec);
   const { sessions } = derived;
   const stats = computeStats(sessions, nowSec, derived.trackingStart);
   const profile = hourlyProfile(sessions, tz, nowSec, stats.daysTracked);
   const daily = dailySeries(sessions, tz, nowSec, 30);
   const latest = samples[samples.length - 1];
-  const live = sessions[sessions.length - 1]?.end === null;
   const meta = targets.byToken.get(token);
   const name = displayName(token, targets);
   const recent = [...sessions].reverse().slice(0, 300);
+  const daysLabel = stats.daysTracked < 1 ? `${Math.max(1, Math.round(stats.daysTracked * 24))} h` : `${stats.daysTracked.toFixed(1)} days`;
 
   return (
     <div>
       <div className="mb-2">
-        <Link href="/" className="text-sm text-neutral-500 hover:text-neutral-300">← All accounts</Link>
+        <Link href="/" className="text-sm text-neutral-500 hover:text-neutral-300">
+          ← All accounts
+        </Link>
       </div>
 
       <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
@@ -50,7 +54,12 @@ export default async function UserPage({ params }: { params: Promise<{ id: strin
             </h1>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-neutral-500">
               {meta?.username ? (
-                <a href={`https://t.me/${meta.username}`} target="_blank" rel="noreferrer" className="rounded-md border border-neutral-800 bg-neutral-900/60 px-2 py-0.5 text-neutral-300 hover:border-neutral-700">
+                <a
+                  href={`https://t.me/${meta.username}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-md border border-neutral-800 bg-neutral-900/60 px-2 py-0.5 text-neutral-300 hover:border-neutral-700"
+                >
                   @{meta.username}
                 </a>
               ) : null}
@@ -61,18 +70,32 @@ export default async function UserPage({ params }: { params: Promise<{ id: strin
           </div>
         </div>
 
-        {live ? (
+        {derived.stale && derived.lastSampleT ? (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5">
+            <div className="text-sm font-medium text-amber-200">No recent polls</div>
+            <div className="mt-0.5 text-xs text-amber-300/70">
+              last poll {formatTimeAgo(new Date(derived.lastSampleT * 1000))}
+              {latest.wo ? ` · last seen ${formatDateTimeInTz(new Date(latest.wo * 1000), tz)}` : ""}
+            </div>
+          </div>
+        ) : derived.live ? (
           <div className="relative overflow-hidden rounded-lg border border-sky-500/50 bg-sky-500/10 px-4 py-2.5">
             <div className="flex items-center gap-2 text-sm font-medium text-sky-200">
               <LiveDot /> Online for {formatDuration(sessionDuration(sessions[sessions.length - 1], nowSec))}
             </div>
-            {latest.ex ? <div className="mt-0.5 text-xs text-sky-300/70">status expires {formatTimeInTz(new Date(latest.ex * 1000), tz)} unless renewed</div> : null}
+            {latest.ex ? (
+              <div className="mt-0.5 text-xs text-sky-300/70">status expires {formatTimeInTz(new Date(latest.ex * 1000), tz)} unless renewed</div>
+            ) : null}
           </div>
         ) : (
           <div className="rounded-lg border border-neutral-800 bg-neutral-900/60 px-4 py-2.5">
             <div className="text-sm font-medium text-neutral-300">Offline</div>
             <div className="mt-0.5 text-xs text-neutral-500">
-              {latest.wo ? `Last seen ${formatTimeAgo(new Date(latest.wo * 1000))} · ${formatDateTimeInTz(new Date(latest.wo * 1000), tz)}` : derived.hidden ? "This person hides their last seen" : "No last-seen timestamp yet"}
+              {latest.wo
+                ? `Last seen ${formatTimeAgo(new Date(latest.wo * 1000))} · ${formatDateTimeInTz(new Date(latest.wo * 1000), tz)}`
+                : derived.hidden
+                  ? "This person hides their last seen"
+                  : "No last-seen timestamp yet"}
             </div>
           </div>
         )}
@@ -85,8 +108,13 @@ export default async function UserPage({ params }: { params: Promise<{ id: strin
       ) : null}
 
       <div className="mb-8 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard icon={<History className="h-4 w-4" />} label="Sessions" value={stats.totalSessions.toString()} hint={`${stats.perDay.toFixed(1)} per day`} />
-        <StatCard icon={<Hourglass className="h-4 w-4" />} label="Time online" value={`${formatHours(stats.totalSec)} h`} hint={`${formatDuration(stats.totalSec / stats.daysTracked)} per day`} />
+        <StatCard icon={<History className="h-4 w-4" />} label="Sessions" value={stats.totalSessions.toString()} hint={`${stats.perDay.toFixed(1)} per day · ${daysLabel} tracked`} />
+        <StatCard
+          icon={<Hourglass className="h-4 w-4" />}
+          label="Time online"
+          value={`${formatHours(stats.totalSec)} h`}
+          hint={`${formatDuration(stats.totalSec / Math.max(stats.daysTracked, 1))} per day`}
+        />
         <StatCard icon={<Clock className="h-4 w-4" />} label="Avg session" value={stats.avgSec ? formatDuration(stats.avgSec) : "-"} />
         <StatCard icon={<Timer className="h-4 w-4" />} label="Longest session" value={stats.longestSec ? formatDuration(stats.longestSec) : "-"} />
       </div>
@@ -151,13 +179,19 @@ export default async function UserPage({ params }: { params: Promise<{ id: strin
                           <div className="text-xs text-neutral-500">{formatTimeAgo(new Date(s.start * 1000))}</div>
                         </td>
                         <td className="px-4 py-2.5 whitespace-nowrap tabular-nums text-neutral-300">
-                          {s.startExact ? "" : "≈ "}{formatTimeInTz(new Date(s.start * 1000), tz)}
+                          {s.startExact ? "" : "≈ "}
+                          {formatTimeInTz(new Date(s.start * 1000), tz)}
                         </td>
                         <td className="px-4 py-2.5 whitespace-nowrap tabular-nums text-neutral-300">
                           {s.end === null ? (
-                            <span className="inline-flex items-center gap-1.5 text-sky-300"><LiveDot /> now</span>
+                            <span className="inline-flex items-center gap-1.5 text-sky-300">
+                              <LiveDot /> now
+                            </span>
                           ) : (
-                            <>{s.endExact ? "" : "≈ "}{formatTimeInTz(new Date(end * 1000), tz)}</>
+                            <>
+                              {s.endExact ? "" : "≈ "}
+                              {formatTimeInTz(new Date(end * 1000), tz)}
+                            </>
                           )}
                         </td>
                         <td className="px-4 py-2.5 whitespace-nowrap tabular-nums text-neutral-300">{formatDuration(end - s.start)}</td>

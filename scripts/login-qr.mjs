@@ -51,7 +51,7 @@ try {
 }
 
 console.log(`\nLogged in as ${[user.firstName, user.lastName].filter(Boolean).join(" ")} (id ${user.id}).`);
-console.log("\nAdd this line to .env and to the GitHub secret TG_SESSION:\n");
+console.log("\nIf this session is for THIS PC, put the line in .env; if it is for CI, put it ONLY in the GitHub secret TG_SESSION. Never both:\n");
 console.log("TG_SESSION=" + client.session.save());
 console.log("\nNever use the same session from two places at the same time.");
 

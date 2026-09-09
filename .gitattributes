@@ -4,3 +4,4 @@
 *.png binary
 *.ico binary
 *.webp binary
+data/**/*.jsonl merge=union

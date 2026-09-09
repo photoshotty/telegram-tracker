@@ -12,16 +12,15 @@ export const DATA_DIR = process.env.DATA_DIR
 const TARGETS_FILE = path.join(ROOT, "targets.local.json");
 
 // The root .env is the collector's; Next only auto-loads web/.env, so read it by hand.
-function rootEnv(name: string): string | null {
-  if (process.env[name]) return process.env[name]!;
+export function rootEnv(name: string): string | null {
   try {
     const text = readFileSync(path.join(ROOT, ".env"), "utf8");
     for (const line of text.split("\n")) {
-      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-      if (m && m[1] === name) return m[2].replace(/^["']|["']$/g, "");
+      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+      if (m && m[1] === name) return m[2].replace(/^["']|["']$/g, "") || null;
     }
   } catch {}
-  return null;
+  return process.env[name] ?? null;
 }
 
 export const dataKey = (): string | null => rootEnv("TG_DATA_KEY");
@@ -33,28 +32,59 @@ export function tokenFor(id: string): string | null {
   return createHmac("sha256", key).update(`user:${id}`).digest("hex").slice(0, 16);
 }
 
+export type LocalSession = { id: string; name: string; username: string | null; at: string };
+export type LastSync = { at: string; usernames: string[] };
+
 export type Targets = {
+  list: TargetMeta[];
   byToken: Map<string, TargetMeta>;
   timezone: string | null;
+  meId: string | null;
   meToken: string | null;
   hasKey: boolean;
+  hasApiKeys: boolean;
+  hasLocalSession: boolean;
+  localSession: LocalSession | null;
+  lastSync: LastSync | null;
+  needsSync: boolean;
 };
 
 export async function loadTargets(): Promise<Targets> {
   const hasKey = !!dataKey();
+  const hasApiKeys = !!rootEnv("TG_API_ID") && !!rootEnv("TG_API_HASH");
+  const hasLocalSession = !!rootEnv("TG_SESSION");
+  let raw: {
+    targets?: TargetMeta[];
+    me?: string | number;
+    settings?: { timezone?: string | null };
+    localSession?: LocalSession;
+    lastSync?: LastSync;
+  } = {};
   try {
-    const raw = JSON.parse(await fs.readFile(TARGETS_FILE, "utf8"));
-    const byToken = new Map<string, TargetMeta>();
-    for (const t of raw.targets ?? []) {
-      const id = String(t.id);
-      const token = tokenFor(id);
-      if (token) byToken.set(token, { ...t, id });
-    }
-    const meToken = raw.me ? tokenFor(String(raw.me)) : null;
-    return { byToken, timezone: raw.settings?.timezone ?? null, meToken, hasKey };
-  } catch {
-    return { byToken: new Map(), timezone: null, meToken: null, hasKey };
+    raw = JSON.parse(await fs.readFile(TARGETS_FILE, "utf8"));
+  } catch {}
+  const list: TargetMeta[] = (raw.targets ?? []).map((t) => ({ ...t, id: String(t.id) }));
+  const byToken = new Map<string, TargetMeta>();
+  for (const t of list) {
+    const token = tokenFor(t.id);
+    if (token) byToken.set(token, t);
   }
+  const meId = raw.me ? String(raw.me) : null;
+  const wanted = list.map((t) => t.username ?? "").filter(Boolean).sort();
+  const synced = [...(raw.lastSync?.usernames ?? [])].sort();
+  return {
+    list,
+    byToken,
+    timezone: raw.settings?.timezone ?? null,
+    meId,
+    meToken: meId ? tokenFor(meId) : null,
+    hasKey,
+    hasApiKeys,
+    hasLocalSession,
+    localSession: raw.localSession ?? null,
+    lastSync: raw.lastSync ?? null,
+    needsSync: JSON.stringify(wanted) !== JSON.stringify(synced),
+  };
 }
 
 export async function listTokens(): Promise<string[]> {

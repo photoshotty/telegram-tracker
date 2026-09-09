@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Radar } from "lucide-react";
-import { RefreshButton } from "@/components/refresh-button";
+import { HeaderActions } from "@/components/header-actions";
 import "./globals.css";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
@@ -24,7 +24,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
               Telegram Tracker
             </Link>
             <div className="ml-auto">
-              <RefreshButton />
+              <HeaderActions />
             </div>
           </div>
         </header>
