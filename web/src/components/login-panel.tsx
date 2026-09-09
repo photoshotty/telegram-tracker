@@ -2,17 +2,16 @@
 
 import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { KeyRound, LogIn, QrCode, X } from "lucide-react";
+import { KeyRound, QrCode, ShieldCheck, X } from "lucide-react";
 import { cancelLogin, finishLogin, getLoginState, startLogin, submitLoginPassword } from "@/app/actions";
 import type { LoginState } from "@/lib/ops";
 import { Button, Card, CardBody, CardHeader } from "./ui";
 
+// Creates or renews the Telegram session that GitHub Actions polls with. Nothing is stored on this PC.
 export function LoginPanel({
-  loggedIn,
   session,
   hasApiKeys,
 }: {
-  loggedIn: boolean;
   session: { name: string; username: string | null; at: string } | null;
   hasApiKeys: boolean;
 }) {
@@ -23,7 +22,6 @@ export function LoginPanel({
   const active = !!state && ["starting", "qr", "password"].includes(state.phase);
   const phase = state?.phase;
 
-  // Poll the server-side worker while a login is in flight.
   useEffect(() => {
     if (!active) return;
     const id = setInterval(async () => {
@@ -37,12 +35,11 @@ export function LoginPanel({
     return () => clearInterval(id);
   }, [active, router]);
 
-  // Once the server re-rendered with the new session, drop the local flow state.
+  // Once the server re-rendered with the new session info, collapse back to the status line.
   useEffect(() => {
-    if (loggedIn && phase === "done") setState(null);
-  }, [loggedIn, phase]);
+    if (phase === "done" && session) setState(null);
+  }, [phase, session]);
 
-  // A fresh password prompt (first or after a wrong attempt) starts with an empty field.
   useEffect(() => {
     if (phase === "password") setPassword("");
   }, [phase, state?.updatedAt]);
@@ -53,17 +50,30 @@ export function LoginPanel({
       setState(await startLogin());
     });
 
-  if (loggedIn && !state) {
+  if (!state) {
     return (
       <div className="mb-6 flex flex-wrap items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900/40 px-4 py-2 text-xs text-neutral-500">
-        <LogIn className="h-3.5 w-3.5 text-emerald-400" />
+        <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
         <span>
-          Local Telegram login: <span className="text-neutral-300">{session?.name || "ready"}</span>
-          {session?.username ? <span className="text-neutral-500"> @{session.username}</span> : null}
-          {session?.at ? <span> · since {new Date(session.at).toLocaleDateString()}</span> : null}
+          GitHub session:{" "}
+          {session ? (
+            <>
+              <span className="text-neutral-300">{session.name || "set"}</span>
+              {session.username ? <span> @{session.username}</span> : null}
+              <span> · renewed {new Date(session.at).toLocaleDateString()}</span>
+            </>
+          ) : (
+            <span className="text-neutral-300">configured</span>
+          )}
         </span>
-        <button type="button" onClick={begin} className="ml-auto text-neutral-500 underline-offset-2 hover:text-neutral-300 hover:underline">
-          re-login
+        <button
+          type="button"
+          onClick={begin}
+          disabled={pending || !hasApiKeys}
+          title="Only needed if Telegram ever revokes the session GitHub uses"
+          className="ml-auto text-neutral-500 underline-offset-2 hover:text-neutral-300 hover:underline disabled:opacity-50"
+        >
+          renew via QR
         </button>
       </div>
     );
@@ -73,8 +83,8 @@ export function LoginPanel({
     <Card className="mb-6">
       <CardHeader className="flex items-center gap-2">
         <QrCode className="h-4 w-4 text-neutral-500" />
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-300">Telegram login</h2>
-        <span className="ml-1 text-xs text-neutral-500">needed once, only to look up people you add</span>
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-300">Renew GitHub session</h2>
+        <span className="ml-1 text-xs text-neutral-500">the new session goes straight into the GitHub secret; nothing is kept on this PC</span>
         {active ? (
           <button
             type="button"
@@ -84,18 +94,16 @@ export function LoginPanel({
           >
             <X className="h-4 w-4" />
           </button>
-        ) : null}
+        ) : (
+          <button type="button" className="ml-auto text-neutral-500 hover:text-neutral-200" onClick={() => setState(null)} aria-label="Close">
+            <X className="h-4 w-4" />
+          </button>
+        )}
       </CardHeader>
       <CardBody>
-        {!hasApiKeys ? (
-          <div className="text-sm text-amber-200">
-            TG_API_ID / TG_API_HASH are missing from the root <code>.env</code>. Get them at https://my.telegram.org/apps first.
-          </div>
-        ) : !state || state.phase === "idle" ? (
+        {state.phase === "idle" ? (
           <div className="flex flex-wrap items-center gap-3">
-            <p className="text-sm text-neutral-400">
-              {loggedIn ? "Create a fresh session for this PC." : "This PC has no Telegram session yet. Scan a QR code with your phone to create one."}
-            </p>
+            <p className="text-sm text-neutral-400">Scan a QR code with your phone to create a fresh session for GitHub Actions.</p>
             <Button onClick={begin} disabled={pending} className="ml-auto">
               <QrCode className="h-3.5 w-3.5" /> Show QR code
             </Button>
@@ -112,7 +120,7 @@ export function LoginPanel({
                 Settings → Devices → <span className="text-neutral-100">Link Desktop Device</span>
               </li>
               <li>Point the camera at this code</li>
-              <li className="text-neutral-500">The code refreshes on its own every ~30 s.</li>
+              <li className="text-neutral-500">The code refreshes on its own every ~30 s. The old GitHub session is replaced.</li>
             </ol>
           </div>
         ) : state.phase === "password" ? (
@@ -138,10 +146,10 @@ export function LoginPanel({
             {state.error ? <span className="text-xs text-red-300">{state.error}</span> : null}
           </form>
         ) : state.phase === "done" ? (
-          <div className="text-sm text-emerald-300">Logged in{state.name ? ` as ${state.name}` : ""}. Refreshing…</div>
+          <div className="text-sm text-emerald-300">Session renewed{state.name ? ` for ${state.name}` : ""} and stored in GitHub. Refreshing…</div>
         ) : (
           <div className="flex flex-wrap items-center gap-3">
-            <span className="text-sm text-red-300">Login failed: {state.error}</span>
+            <span className="text-sm text-red-300">Failed: {state.error}</span>
             <Button onClick={begin} className="ml-auto">
               Try again
             </Button>

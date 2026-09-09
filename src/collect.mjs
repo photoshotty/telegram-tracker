@@ -12,6 +12,9 @@
 // keyed by SHA-256 of the username. Names that do not resolve are remembered for 24 h and
 // a FLOOD_WAIT pauses all resolution until it expires. Access hashes are bound to the login
 // session, so the cache is discarded when TG_SESSION changes.
+//
+// <DATA_DIR>/targets.map.enc (AES-GCM, TG_DATA_KEY) tells the local dashboard which token is
+// which person (id, username, display name) so no Telegram login is needed on the PC.
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -28,6 +31,7 @@ const DATA_KEY = requireKey();
 
 const DATA_DIR = path.resolve(process.env.DATA_DIR ?? (process.env.GITHUB_ACTIONS ? "data" : "data-local"));
 const CACHE_FILE = path.join(DATA_DIR, "targets.cache.enc");
+const MAP_FILE = path.join(DATA_DIR, "targets.map.enc");
 const RESOLVE_DELAY_MS = 1500; // be gentle with contacts.resolveUsername
 const RETRY_FAILED_MS = 24 * 60 * 60 * 1000;
 
@@ -65,18 +69,24 @@ function normalize(status) {
   }
 }
 
-async function loadCache() {
+async function loadEncrypted(file, fallback) {
   try {
-    const c = decryptJson(DATA_KEY, await readFile(CACHE_FILE, "utf8"));
-    if (c.session === sessionKey && c.entries) return c;
-    console.log("targets cache belongs to another session; re-resolving");
-  } catch {}
-  return { session: sessionKey, entries: {} };
+    return decryptJson(DATA_KEY, await readFile(file, "utf8"));
+  } catch {
+    return fallback;
+  }
 }
 
-async function saveCache(cache) {
+async function saveEncrypted(file, obj) {
   await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(CACHE_FILE, encryptJson(DATA_KEY, cache) + "\n");
+  await writeFile(file, encryptJson(DATA_KEY, obj) + "\n");
+}
+
+async function loadCache() {
+  const c = await loadEncrypted(CACHE_FILE, null);
+  if (c && c.session === sessionKey && c.entries) return c;
+  if (c) console.log("targets cache belongs to another session; re-resolving");
+  return { session: sessionKey, entries: {} };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -121,7 +131,7 @@ async function resolveMissing(client, cache, usernames) {
     }
     await sleep(RESOLVE_DELAY_MS);
   }
-  if (changed) await saveCache(cache);
+  if (changed) await saveEncrypted(CACHE_FILE, cache);
 }
 
 function describe(sample) {
@@ -136,6 +146,30 @@ async function writeSample(token, sample) {
   await mkdir(dir, { recursive: true });
   const month = new Date(sample.t * 1000).toISOString().slice(0, 7);
   await appendFile(path.join(dir, `${month}.jsonl`), JSON.stringify(sample) + "\n");
+}
+
+// The encrypted name map: token -> who, plus lookups that failed (keyed by sha(username)).
+async function updateMap(users, cache, usernames, t) {
+  const map = (await loadEncrypted(MAP_FILE, null)) ?? { byToken: {}, failed: {} };
+  map.byToken ??= {};
+  map.failed = {};
+  for (const user of users) {
+    if (user.className !== "User") continue;
+    const token = tokenFor(DATA_KEY, user.id.toString());
+    map.byToken[token] = {
+      id: user.id.toString(),
+      username: user.username ? String(user.username).toLowerCase() : null,
+      name: [user.firstName, user.lastName].filter(Boolean).join(" "),
+      self: !!user.self,
+      updatedAt: t,
+    };
+  }
+  for (const u of usernames) {
+    const e = cache.entries[sha(u)];
+    if (e?.failed) map.failed[sha(u)] = { message: e.failed, at: e.at };
+  }
+  map.updatedAt = t;
+  await saveEncrypted(MAP_FILE, map);
 }
 
 async function main() {
@@ -182,6 +216,7 @@ async function main() {
       written += 1;
       console.log(`[${new Date(t * 1000).toISOString()}] ${token} ${describe(sample)}`);
     }
+    await updateMap(users, cache, usernames, t);
     const pending = usernames.filter((u) => !resolved(cache, u)).length;
     console.log(`polled ${written} user(s) into ${path.relative(process.cwd(), DATA_DIR) || "."}${pending ? `, ${pending} target(s) unresolved` : ""}`);
   } finally {

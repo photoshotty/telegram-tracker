@@ -3,7 +3,7 @@ import { ChevronRight, Radar } from "lucide-react";
 import { LoginPanel } from "@/components/login-panel";
 import { PeoplePanel, type PersonRow } from "@/components/people-panel";
 import { Badge, Card, CardBody, CardHeader, EmptyState, LiveDot } from "@/components/ui";
-import { displayName, listTokens, loadSamples, loadTargets, serverTimezone, tokenFor } from "@/lib/data";
+import { displayName, listTokens, loadSamples, loadTargets, serverTimezone, sha256, tokenFor } from "@/lib/data";
 import { lastPullError, maybePull } from "@/lib/ops";
 import { computeStats, deriveSessions, todaySummary } from "@/lib/sessions";
 import { formatDuration, formatTimeAgo } from "@/lib/time";
@@ -30,10 +30,45 @@ export default async function HomePage() {
   );
   rows.sort((a, b) => Number(b.derived.live) - Number(a.derived.live) || (b.latest?.wo ?? 0) - (a.latest?.wo ?? 0));
 
-  const people: PersonRow[] = targets.list.map((t) => {
-    const token = tokenFor(t.id);
-    return { ...t, token, hasData: !!token && tokens.includes(token), isMe: targets.meId === t.id };
-  });
+  // People = everyone on the local list plus anyone the map knows (e.g. the account itself).
+  const people: PersonRow[] = [];
+  const seenTokens = new Set<string>();
+  for (const t of targets.list) {
+    const entry = targets.map
+      ? Object.entries(targets.map.byToken).find(([, e]) => (t.id && e.id === t.id) || (e.username && e.username === t.username))
+      : undefined;
+    const token = entry?.[0] ?? (t.id ? tokenFor(t.id) : null);
+    if (token) seenTokens.add(token);
+    const failure = t.username ? targets.map?.failed[sha256(t.username)] : undefined;
+    people.push({
+      username: t.username,
+      name: t.name?.trim() || entry?.[1].name || (t.username ? `@${t.username}` : `User ${t.id}`),
+      telegramName: entry?.[1].name || null,
+      note: t.note,
+      id: entry?.[1].id ?? t.id,
+      token,
+      hasData: !!token && tokens.includes(token),
+      isMe: !!token && token === targets.meToken,
+      status: entry ? "tracked" : failure ? "failed" : "pending",
+      failure: failure?.message,
+    });
+  }
+  if (targets.map) {
+    for (const [token, e] of Object.entries(targets.map.byToken)) {
+      if (seenTokens.has(token)) continue;
+      people.push({
+        username: e.username ?? "",
+        name: e.name || (e.username ? `@${e.username}` : `User ${e.id}`),
+        telegramName: null,
+        id: e.id,
+        token,
+        hasData: tokens.includes(token),
+        isMe: token === targets.meToken,
+        status: "tracked",
+      });
+    }
+  }
+  people.sort((a, b) => Number(b.isMe) - Number(a.isMe) || a.name.localeCompare(b.name));
 
   return (
     <div>
@@ -56,9 +91,9 @@ export default async function HomePage() {
         </div>
       ) : null}
 
-      <LoginPanel loggedIn={targets.hasLocalSession} session={targets.localSession} hasApiKeys={targets.hasApiKeys} />
+      <LoginPanel session={targets.ciSession} hasApiKeys={targets.hasApiKeys} />
 
-      <PeoplePanel people={people} loggedIn={targets.hasLocalSession} needsSync={targets.needsSync} lastSyncAt={targets.lastSync?.at ?? null} />
+      <PeoplePanel people={people} needsSync={targets.needsSync} lastSyncAt={targets.lastSync?.at ?? null} />
 
       <Card>
         <CardHeader className="flex items-center gap-2">

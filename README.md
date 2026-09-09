@@ -8,38 +8,39 @@ Logs when tracked Telegram accounts are online / last seen, every 5 minutes, and
 npm run dev        # http://localhost:3000
 ```
 
-Everything else is a button in the dashboard:
+Everything else is a button in the dashboard. No Telegram login on this PC.
 
 | Button | What it does |
 |---|---|
-| **Show QR code** | Logs this PC into Telegram once (Settings → Devices → Link Desktop Device on the phone). Needed only to look people up when you add them. |
-| **Add** (People panel) | Looks up an @username with the local login, stores name + id in `targets.local.json` on this PC, and pushes the username list to the GitHub secret. |
+| **Add** (People panel) | Saves the @username here and pushes the list to a GitHub secret. GitHub looks the person up on its next poll and publishes an encrypted name map only your key can read. |
 | trash icon | Stops tracking someone (their data stays). |
 | **Sync** | Re-pushes the username list and data key to GitHub secrets. |
 | **Poll now** | Triggers the GitHub Action, waits for it, and pulls the new samples. |
 | **Pull latest** | `git pull` the samples the Action committed. The page also pulls by itself at most once a minute. |
+| **renew via QR** | Only if Telegram ever revokes the session GitHub uses: scan once, the new session goes straight into the GitHub secret. |
 
-New people get their first data on the next Action run (up to 5 minutes, sometimes longer when GitHub's scheduler is busy). Press **Poll now** to skip the wait.
+New people show "waiting for next poll" until the Action runs (up to 5 minutes, sometimes longer when GitHub's scheduler is busy). Press **Poll now** to skip the wait.
 
 ## How the pieces fit
 
 | Where | What lives there |
 |---|---|
-| GitHub Actions (public repo) | Runs `src/collect.mjs` every 5 min and commits samples to `data/` |
+| GitHub Actions (public repo) | Runs `src/collect.mjs` every 5 min and commits to `data/` |
 | `data/<token>/YYYY-MM.jsonl` (public) | Timestamps only. `<token>` = HMAC of the Telegram id with `TG_DATA_KEY`, so ids are not recoverable without the key |
+| `data/targets.map.enc` (public) | AES-encrypted map token → id, username, name. Readable only with the key |
 | `data/targets.cache.enc` (public) | AES-encrypted cache of resolved access hashes, useless without the key and the CI session |
-| GitHub secrets | `TG_API_ID`, `TG_API_HASH`, `TG_SESSION` (CI login), `TG_TARGETS` (usernames), `TG_DATA_KEY` |
-| `targets.local.json` (local, gitignored) | Your list: usernames, names, notes, numeric ids |
-| `.env` (local, gitignored) | API keys, your local login, the same `TG_DATA_KEY` |
+| GitHub secrets | `TG_API_ID`, `TG_API_HASH`, `TG_SESSION` (the only Telegram login), `TG_TARGETS` (usernames), `TG_DATA_KEY` |
+| `targets.local.json` (local, gitignored) | Your list: usernames, custom names, notes |
+| `.env` (local, gitignored) | API keys and the same `TG_DATA_KEY` |
 | `web/` | Next.js dashboard, local only, bound to 127.0.0.1 |
 
 ## One-time setup on a new machine
 
 1. `cp .env.example .env` and fill `TG_API_ID`, `TG_API_HASH` from https://my.telegram.org/apps and the existing `TG_DATA_KEY` (same value as the GitHub secret; never change it, folder names derive from it).
 2. `npm install && npm --prefix web install`
-3. `npm run dev`, press **Show QR code**, scan. Done.
+3. `npm run dev`. Done.
 
-If you ever need the CLI instead of the dashboard: `npm run login:qr`, `npm run targets -- add @user | remove @user | list | sync | keygen`, `npm run poll` (a local poll writes to `data-local/`, which is gitignored, so it never collides with what the Action commits).
+CLI equivalents if you ever want them: `npm run targets -- add @user | remove @user | list | sync | keygen`, `npm run login:qr` (prints a session string for the GitHub secret), `npm run poll` (local test poll into `data-local/`, needs `TG_SESSION` in `.env`).
 
 ## Publishing from scratch (already done for photoshotty/telegram-tracker)
 
@@ -48,7 +49,8 @@ git init -b main && git add -A && git commit -m "collector"
 gh repo create telegram-tracker --public --source=. --push
 gh secret set TG_API_ID --body "<api_id>"
 gh secret set TG_API_HASH --body "<api_hash>"
-gh secret set TG_SESSION --body "<a session string NOT used anywhere else>"
+npm run login:qr             # scan; paste the printed string into the next command only
+gh secret set TG_SESSION     # reads the string from stdin
 npm run targets -- sync      # uploads TG_TARGETS and TG_DATA_KEY
 ```
 Then Actions → poll → Run workflow. Public repo matters: private repos would exceed the free Actions minutes.
@@ -72,8 +74,8 @@ Every session **end** is exact (`wo`). Session **starts** are known only to with
 
 ## Rules that keep the account safe
 
-- One session string is never used from two places at the same time (local vs CI are separate logins).
-- The collector never calls `account.updateStatus` and resolves each username only once (cached, encrypted).
+- Exactly one Telegram session exists, and only GitHub Actions uses it.
+- The collector never calls `account.updateStatus`; each username is resolved once (cached, encrypted), dead usernames are retried once a day, and a flood wait pauses lookups.
 - Use an established Telegram account, not a fresh virtual number.
 - People who hide their last seen only yield "recently"; the dashboard flags them.
 

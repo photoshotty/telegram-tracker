@@ -4,19 +4,27 @@ import { useState, useTransition } from "react";
 import Link from "next/link";
 import { CloudUpload, Trash2, UserPlus, Users } from "lucide-react";
 import { addTarget, removeTarget, syncTargets } from "@/app/actions";
-import type { TargetMeta } from "@/lib/types";
 import { Badge, Button, Card, CardBody, CardHeader, cn } from "./ui";
 
-export type PersonRow = TargetMeta & { token: string | null; hasData: boolean; isMe: boolean };
+export type PersonRow = {
+  username: string;
+  name: string; // what to show: your custom name, else the Telegram name, else @username
+  telegramName: string | null;
+  note?: string;
+  id?: string;
+  token: string | null;
+  hasData: boolean;
+  isMe: boolean;
+  status: "tracked" | "pending" | "failed";
+  failure?: string;
+};
 
 export function PeoplePanel({
   people,
-  loggedIn,
   needsSync,
   lastSyncAt,
 }: {
   people: PersonRow[];
-  loggedIn: boolean;
   needsSync: boolean;
   lastSyncAt: string | null;
 }) {
@@ -95,10 +103,9 @@ export function PeoplePanel({
               className="h-8 w-48 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-sm text-neutral-100 outline-none focus:border-neutral-600"
             />
           </label>
-          <Button type="submit" disabled={pending || !loggedIn || !username.trim()} title={loggedIn ? "Look up and start tracking" : "Log in with the QR code first"}>
+          <Button type="submit" disabled={pending || !username.trim()} title="Save and push to GitHub; the next poll looks them up">
             <UserPlus className="h-3.5 w-3.5" /> {pending ? "Working…" : "Add"}
           </Button>
-          {!loggedIn ? <span className="text-xs text-amber-300">log in above to add people</span> : null}
         </form>
 
         {msg ? <div className={cn("text-xs", msg.ok ? "text-emerald-300" : "text-red-300")}>{msg.text}</div> : null}
@@ -106,24 +113,34 @@ export function PeoplePanel({
         {people.length > 0 ? (
           <ul className="divide-y divide-neutral-900 rounded-lg border border-neutral-900">
             {people.map((p) => (
-              <li key={p.id} className="flex flex-wrap items-center gap-3 px-3 py-2 text-sm">
+              <li key={p.username || p.id} className="flex flex-wrap items-center gap-3 px-3 py-2 text-sm">
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-neutral-100">
-                    {p.name || (p.username ? `@${p.username}` : `id ${p.id}`)}
+                    {p.name}
                     {p.isMe ? <span className="ml-1.5 text-xs text-neutral-500">(me)</span> : null}
+                    {p.telegramName && p.telegramName !== p.name ? <span className="ml-1.5 text-xs text-neutral-500">{p.telegramName}</span> : null}
                   </div>
                   <div className="truncate text-xs text-neutral-500">
-                    {p.username ? `@${p.username} · ` : ""}id {p.id}
+                    {p.username ? `@${p.username}` : ""}
+                    {p.id ? ` · id ${p.id}` : ""}
                     {p.note ? ` · ${p.note}` : ""}
                     {p.token ? ` · folder ${p.token}` : ""}
                   </div>
                 </div>
-                {p.hasData && p.token ? (
+                {p.status === "failed" ? (
+                  <span className="text-xs text-red-300" title={p.failure}>
+                    not found on Telegram
+                  </span>
+                ) : p.status === "pending" ? (
+                  <span className="text-xs text-amber-300" title="GitHub looks new people up on its next poll (press Poll now to hurry)">
+                    waiting for next poll
+                  </span>
+                ) : p.hasData && p.token ? (
                   <Link href={`/u/${p.token}`} className="text-xs text-sky-300 hover:underline">
                     open
                   </Link>
                 ) : (
-                  <span className="text-xs text-neutral-600" title="Data appears after the next poll on GitHub">no data yet</span>
+                  <span className="text-xs text-neutral-600">no data yet</span>
                 )}
                 {!p.isMe && p.username ? (
                   <button
@@ -134,7 +151,7 @@ export function PeoplePanel({
                     onClick={() => {
                       if (!confirm(`Stop tracking @${p.username}?`)) return;
                       start(async () => {
-                        const r = await removeTarget(p.username!);
+                        const r = await removeTarget(p.username);
                         setMsg({ ok: r.ok, text: r.output });
                       });
                     }}
@@ -147,7 +164,7 @@ export function PeoplePanel({
           </ul>
         ) : null}
         <p className="text-xs text-neutral-600">
-          Adding someone looks them up once with your local login, stores their name here on your PC only, and pushes the username list to a GitHub secret. The public repo only ever sees the folder token.
+          Adding someone stores the username on this PC and in a GitHub secret. GitHub looks them up on its next poll and publishes an encrypted name map only your key can read; the public repo shows nothing but folder tokens.
         </p>
       </CardBody>
     </Card>

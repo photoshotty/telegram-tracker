@@ -1,9 +1,12 @@
-// QR login driven over stdio JSON lines. Spawned by the dashboard (web/src/lib/ops.ts).
+// QR login driven over stdio JSON lines. Spawned by the dashboard (web/src/lib/ops.ts) to
+// create or renew the session that GitHub Actions uses. The session string never touches
+// the local .env: on success it is pushed straight into the GitHub secret TG_SESSION.
+//   argv: --repo owner/name
 //   stdout: {"type":"qr","url":"tg://login?token=..."} | {"type":"password","hint":"","error":null|"..."}
 //           {"type":"done","id":"...","name":"...","username":...} | {"type":"error","message":"..."}
 //   stdin:  {"type":"password","value":"..."} | {"type":"cancel"}
-// On success it writes TG_SESSION into .env and localSession into targets.local.json (cwd = repo root).
 import readline from "node:readline";
+import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { TelegramClient } from "teleproto";
 import { StringSession } from "teleproto/sessions/index.js";
@@ -12,8 +15,14 @@ const emit = (o) => process.stdout.write(JSON.stringify(o) + "\n");
 
 const apiId = Number(process.env.TG_API_ID);
 const apiHash = process.env.TG_API_HASH;
+const repoIdx = process.argv.indexOf("--repo");
+const repo = repoIdx >= 0 ? process.argv[repoIdx + 1] : process.env.GH_REPO;
 if (!apiId || !apiHash) {
   emit({ type: "error", message: "TG_API_ID / TG_API_HASH are missing in .env" });
+  process.exit(1);
+}
+if (!repo) {
+  emit({ type: "error", message: "no GitHub repo given (--repo owner/name)" });
   process.exit(1);
 }
 
@@ -30,29 +39,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   } catch {}
 });
 
-async function upsertEnv(key, value) {
-  let text = "";
-  try {
-    text = await readFile(".env", "utf8");
-  } catch {}
-  const lines = text.split(/\r?\n/);
-  const idx = lines.findIndex((l) => l.startsWith(key + "="));
-  if (idx >= 0) lines[idx] = `${key}=${value}`;
-  else lines.push(`${key}=${value}`);
-  await writeFile(".env", lines.join("\n").replace(/\n*$/, "\n"));
-}
-
-async function rememberLocalSession(info) {
+async function rememberCiSession(info) {
   let db = { targets: [] };
   try {
     db = JSON.parse(await readFile("targets.local.json", "utf8"));
   } catch {}
-  db.localSession = { ...info, at: new Date().toISOString() };
-  if (!db.me) db.me = info.id;
-  if (!Array.isArray(db.targets)) db.targets = [];
-  if (!db.targets.some((t) => String(t.id) === info.id)) {
-    db.targets.push({ id: info.id, username: info.username ?? "", name: info.name || "Me", note: "my own account", addedAt: new Date().toISOString() });
-  }
+  db.ciSession = { ...info, at: new Date().toISOString() };
   await writeFile("targets.local.json", JSON.stringify(db, null, 2) + "\n");
 }
 
@@ -97,11 +89,12 @@ try {
     name: [user.firstName, user.lastName].filter(Boolean).join(" "),
     username: user.username ? String(user.username).toLowerCase() : null,
   };
-  await upsertEnv("TG_SESSION", client.session.save());
-  await rememberLocalSession(info);
+  const session = client.session.save();
+  execFileSync("gh", ["secret", "set", "TG_SESSION", "-R", repo], { input: session, stdio: ["pipe", "ignore", "pipe"] });
+  await rememberCiSession(info);
   emit({ type: "done", ...info });
 } catch (e) {
-  if (!fatal) emit({ type: "error", message: e?.errorMessage ?? e?.message ?? String(e) });
+  if (!fatal) emit({ type: "error", message: e?.errorMessage ?? e?.stderr?.toString?.() ?? e?.message ?? String(e) });
   process.exitCode = 1;
 } finally {
   try {

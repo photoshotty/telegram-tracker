@@ -1,5 +1,5 @@
 // Server-only helpers that read the collector's files from the repo root.
-import { createHmac } from "node:crypto";
+import { createDecipheriv, createHash, createHmac } from "node:crypto";
 import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import type { Sample, TargetMeta } from "./types";
@@ -10,6 +10,7 @@ export const DATA_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(ROOT, "data");
 const TARGETS_FILE = path.join(ROOT, "targets.local.json");
+const MAP_FILE = path.join(DATA_DIR, "targets.map.enc");
 
 // The root .env is the collector's; Next only auto-loads web/.env, so read it by hand.
 export function rootEnv(name: string): string | null {
@@ -32,19 +33,44 @@ export function tokenFor(id: string): string | null {
   return createHmac("sha256", key).update(`user:${id}`).digest("hex").slice(0, 16);
 }
 
-export type LocalSession = { id: string; name: string; username: string | null; at: string };
+export const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+
+// Same format as src/crypto.mjs: base64(iv[12] | tag[16] | ciphertext), AES-256-GCM, key = sha256(TG_DATA_KEY).
+function decryptJson<T>(key: string, b64: string): T {
+  const buf = Buffer.from(b64.trim(), "base64");
+  const decipher = createDecipheriv("aes-256-gcm", createHash("sha256").update(key).digest(), buf.subarray(0, 12));
+  decipher.setAuthTag(buf.subarray(12, 28));
+  return JSON.parse(Buffer.concat([decipher.update(buf.subarray(28)), decipher.final()]).toString("utf8")) as T;
+}
+
+export type MapEntry = { id: string; username: string | null; name: string; self: boolean; updatedAt: number };
+export type NameMap = { byToken: Record<string, MapEntry>; failed: Record<string, { message: string; at: number }>; updatedAt?: number };
+
+// Written by the GitHub Action, encrypted with the data key: who each token is.
+export async function loadNameMap(): Promise<NameMap | null> {
+  const key = dataKey();
+  if (!key) return null;
+  try {
+    const m = decryptJson<NameMap>(key, await fs.readFile(MAP_FILE, "utf8"));
+    return { byToken: m.byToken ?? {}, failed: m.failed ?? {}, updatedAt: m.updatedAt };
+  } catch {
+    return null;
+  }
+}
+
+export type LocalTarget = { username: string; name?: string; note?: string; addedAt?: string; id?: string };
+export type CiSession = { name: string; username: string | null; at: string };
 export type LastSync = { at: string; usernames: string[] };
 
 export type Targets = {
-  list: TargetMeta[];
+  list: LocalTarget[];
   byToken: Map<string, TargetMeta>;
+  map: NameMap | null;
   timezone: string | null;
-  meId: string | null;
   meToken: string | null;
   hasKey: boolean;
   hasApiKeys: boolean;
-  hasLocalSession: boolean;
-  localSession: LocalSession | null;
+  ciSession: CiSession | null;
   lastSync: LastSync | null;
   needsSync: boolean;
 };
@@ -52,36 +78,53 @@ export type Targets = {
 export async function loadTargets(): Promise<Targets> {
   const hasKey = !!dataKey();
   const hasApiKeys = !!rootEnv("TG_API_ID") && !!rootEnv("TG_API_HASH");
-  const hasLocalSession = !!rootEnv("TG_SESSION");
   let raw: {
-    targets?: TargetMeta[];
-    me?: string | number;
+    targets?: LocalTarget[];
     settings?: { timezone?: string | null };
-    localSession?: LocalSession;
+    ciSession?: CiSession;
     lastSync?: LastSync;
   } = {};
   try {
     raw = JSON.parse(await fs.readFile(TARGETS_FILE, "utf8"));
   } catch {}
-  const list: TargetMeta[] = (raw.targets ?? []).map((t) => ({ ...t, id: String(t.id) }));
+  const list: LocalTarget[] = (raw.targets ?? [])
+    .map((t) => ({ ...t, username: String(t.username ?? "").toLowerCase(), id: t.id ? String(t.id) : undefined }))
+    .filter((t) => t.username || t.id);
+
+  const map = await loadNameMap();
   const byToken = new Map<string, TargetMeta>();
-  for (const t of list) {
-    const token = tokenFor(t.id);
-    if (token) byToken.set(token, t);
+  let meToken: string | null = null;
+  if (map) {
+    for (const [token, e] of Object.entries(map.byToken)) {
+      const local = list.find((t) => (t.id && t.id === e.id) || (e.username && t.username === e.username));
+      byToken.set(token, {
+        id: e.id,
+        username: e.username ?? local?.username,
+        name: local?.name?.trim() || e.name || (e.username ? `@${e.username}` : `User ${e.id}`),
+        note: local?.note,
+        addedAt: local?.addedAt,
+      });
+      if (e.self) meToken = token;
+    }
   }
-  const meId = raw.me ? String(raw.me) : null;
-  const wanted = list.map((t) => t.username ?? "").filter(Boolean).sort();
+  // Names the user typed for people the Action has not looked up yet still get a token when the id is known.
+  for (const t of list) {
+    if (!t.id) continue;
+    const token = tokenFor(t.id);
+    if (token && !byToken.has(token)) byToken.set(token, { id: t.id, username: t.username || undefined, name: t.name || (t.username ? `@${t.username}` : `User ${t.id}`), note: t.note, addedAt: t.addedAt });
+  }
+
+  const wanted = list.map((t) => t.username).filter(Boolean).sort();
   const synced = [...(raw.lastSync?.usernames ?? [])].sort();
   return {
     list,
     byToken,
+    map,
     timezone: raw.settings?.timezone ?? null,
-    meId,
-    meToken: meId ? tokenFor(meId) : null,
+    meToken,
     hasKey,
     hasApiKeys,
-    hasLocalSession,
-    localSession: raw.localSession ?? null,
+    ciSession: raw.ciSession ?? null,
     lastSync: raw.lastSync ?? null,
     needsSync: JSON.stringify(wanted) !== JSON.stringify(synced),
   };

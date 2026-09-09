@@ -198,9 +198,10 @@ export async function startLogin(): Promise<LoginState> {
   }
   m.state = { phase: "starting", updatedAt: Date.now() };
   m.lastStderr = "";
+  const slug = await repoSlug();
   let child: ChildProcess;
   try {
-    child = spawn(process.execPath, ["--env-file-if-exists=.env", "src/login-qr-json.mjs"], {
+    child = spawn(process.execPath, ["--env-file-if-exists=.env", "src/login-qr-json.mjs", "--repo", slug], {
       cwd: ROOT,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
