@@ -1,0 +1,6 @@
+# Keep data and scripts LF everywhere: the GitHub Action appends LF lines on Linux
+# and the local checkout must not turn them into CRLF.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.webp binary

@@ -39,11 +39,11 @@ Logs when tracked Telegram accounts are online / last seen, every 5 minutes, and
    git add -A && git commit -m "collector"
    gh repo create telegram-tracker --public --source=. --push
    ```
-   Then a **second** QR login for CI: `npm run login:qr` again, and store that string as the secret (do not put it in `.env`):
+   CI needs its **own** login. Either move the current `.env` session to the secret and log in again locally, or run `npm run login:qr` a second time and use the new string for CI. Never let both places use the same string:
    ```bash
    gh secret set TG_API_ID --body "<api_id>"
    gh secret set TG_API_HASH --body "<api_hash>"
-   gh secret set TG_SESSION --body "<the second session string>"
+   gh secret set TG_SESSION --body "<the CI session string>"
    npm run targets -- sync      # uploads TG_TARGETS and TG_DATA_KEY
    ```
    Start it: https://github.com/photoshotty/telegram-tracker/actions/workflows/poll.yml > Run workflow. It then runs every 5 minutes.
