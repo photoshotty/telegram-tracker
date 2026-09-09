@@ -71,7 +71,8 @@ export default async function HomePage() {
         token,
         hasData: tokens.includes(token),
         isMe: token === targets.meToken,
-        status: "tracked",
+        // Known from earlier polls but absent from targets.local.json: GitHub is not polling them.
+        status: token === targets.meToken ? "tracked" : "untracked",
       });
     }
   }

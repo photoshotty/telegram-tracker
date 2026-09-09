@@ -16,7 +16,7 @@ export type PersonRow = {
   token: string | null;
   hasData: boolean;
   isMe: boolean;
-  status: "tracked" | "pending" | "failed";
+  status: "tracked" | "pending" | "failed" | "untracked";
   failure?: string;
 };
 
@@ -196,6 +196,10 @@ export function PeoplePanel({
               ) : p.status === "pending" ? (
                 <Badge variant="warn">
                   <span title="GitHub looks new people up on its next poll (press Poll now to hurry)">waiting for next poll</span>
+                </Badge>
+              ) : p.status === "untracked" ? (
+                <Badge variant="warn">
+                  <span title="Seen in earlier polls but no longer in your list: add them again to resume">not tracked · add again</span>
                 </Badge>
               ) : p.hasData && p.token ? (
                 <Link

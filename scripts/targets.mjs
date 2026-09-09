@@ -10,7 +10,7 @@
 // No Telegram login is needed here: the GitHub Action looks people up on its next run and
 // publishes the encrypted name map the dashboard reads. Only HMAC tokens reach the repo.
 import { execFileSync } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { generateKey, tokenFor } from "../src/crypto.mjs";
 import { ghEnvFor } from "../src/gh.mjs";
@@ -19,21 +19,32 @@ const FILE = path.resolve("targets.local.json");
 const REPO = process.env.GH_REPO ?? "photoshotty/telegram-tracker";
 const GH_ENV = ghEnvFor(REPO);
 
+// A missing file means an empty list; an unreadable one must never be silently replaced.
 async function load() {
+  let text;
   try {
-    const db = JSON.parse(await readFile(FILE, "utf8"));
-    if (!Array.isArray(db.targets)) db.targets = [];
-    return db;
-  } catch {
-    return { targets: [] };
+    text = await readFile(FILE, "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return { targets: [] };
+    throw e;
   }
+  let db;
+  try {
+    db = JSON.parse(text);
+  } catch {
+    throw new Error("targets.local.json is not valid JSON; refusing to overwrite it (another write may be in progress, try again)");
+  }
+  if (!Array.isArray(db.targets)) db.targets = [];
+  return db;
 }
 
-// Re-read right before writing so a concurrent writer (the dashboard's login worker) is not clobbered.
+// Re-read right before writing so a concurrent writer is not clobbered; write atomically via rename.
 async function mutate(fn) {
   const db = await load();
   const result = await fn(db);
-  await writeFile(FILE, JSON.stringify(db, null, 2) + "\n");
+  const tmp = `${FILE}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify(db, null, 2) + "\n");
+  await rename(tmp, FILE);
   return result;
 }
 
