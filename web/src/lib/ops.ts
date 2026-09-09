@@ -157,8 +157,8 @@ export async function pollNow(): Promise<{ ok: boolean; output: string }> {
 
 // ---------- targets ----------
 
-export async function addTarget(input: { username: string; name?: string; note?: string }) {
-  const args = ["add", input.username.trim()];
+export async function addTarget(input: { username?: string; id?: string; name?: string; note?: string }) {
+  const args = input.id ? ["add", "--id", input.id] : ["add", (input.username ?? "").trim()];
   if (input.name?.trim()) args.push("--name", input.name.trim());
   if (input.note?.trim()) args.push("--note", input.note.trim());
   const r = await runNode("scripts/targets.mjs", args, { timeoutMs: 60_000 });
@@ -167,9 +167,17 @@ export async function addTarget(input: { username: string; name?: string; note?:
   return { ok: s.ok, output: `${tidy(r)} · ${s.output}` };
 }
 
-export async function removeTarget(username: string) {
-  const r = await runNode("scripts/targets.mjs", ["remove", username], { timeoutMs: 30_000 });
+export async function removeTarget(target: { username?: string; id?: string }) {
+  const args = target.id ? ["remove", "--id", target.id] : ["remove", target.username ?? ""];
+  const r = await runNode("scripts/targets.mjs", args, { timeoutMs: 30_000 });
   if (!r.ok) return { ok: false, output: tidy(r) || "remove failed" };
+  const s = await syncTargets();
+  return { ok: s.ok, output: `${tidy(r)} · ${s.output}` };
+}
+
+export async function setTrackSelf(on: boolean) {
+  const r = await runNode("scripts/targets.mjs", ["self", on ? "on" : "off"], { timeoutMs: 30_000 });
+  if (!r.ok) return { ok: false, output: tidy(r) || "could not change the setting" };
   const s = await syncTargets();
   return { ok: s.ok, output: `${tidy(r)} · ${s.output}` };
 }

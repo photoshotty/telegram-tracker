@@ -59,6 +59,24 @@ export async function loadNameMap(): Promise<NameMap | null> {
 }
 
 export type LocalTarget = { username: string; name?: string; note?: string; addedAt?: string; id?: string };
+export type ChatEntry = { id: string; name: string; username: string | null; source: "contact" | "chat" | "forward" | "card" };
+
+// Written by the GitHub Action, encrypted: the account's contacts and recent private chats.
+export async function loadDialogs(): Promise<{ users: ChatEntry[]; updatedAt: number } | null> {
+  const key = dataKey();
+  if (!key) return null;
+  try {
+    const d = decryptJson<{ users: ChatEntry[]; updatedAt: number }>(key, await fs.readFile(path.join(DATA_DIR, "dialogs.map.enc"), "utf8"));
+    return { users: d.users ?? [], updatedAt: d.updatedAt ?? 0 };
+  } catch {
+    return null;
+  }
+}
+
+export const listDialogsSafe = loadDialogs;
+
+// What the collector receives for a target: "@username" or "id:<n>".
+export const targetKey = (t: { username?: string; id?: string }) => (t.username ? t.username : t.id ? `id:${t.id}` : null);
 export type CiSession = { name: string; username: string | null; at: string };
 export type LastSync = { at: string; usernames: string[] };
 
@@ -73,6 +91,7 @@ export type Targets = {
   ciSession: CiSession | null;
   lastSync: LastSync | null;
   needsSync: boolean;
+  trackSelf: boolean;
 };
 
 export async function loadTargets(): Promise<Targets> {
@@ -80,7 +99,7 @@ export async function loadTargets(): Promise<Targets> {
   const hasApiKeys = !!rootEnv("TG_API_ID") && !!rootEnv("TG_API_HASH");
   let raw: {
     targets?: LocalTarget[];
-    settings?: { timezone?: string | null };
+    settings?: { timezone?: string | null; trackSelf?: boolean };
     ciSession?: CiSession;
     lastSync?: LastSync;
   } = {};
@@ -114,7 +133,8 @@ export async function loadTargets(): Promise<Targets> {
     if (token && !byToken.has(token)) byToken.set(token, { id: t.id, username: t.username || undefined, name: t.name || (t.username ? `@${t.username}` : `User ${t.id}`), note: t.note, addedAt: t.addedAt });
   }
 
-  const wanted = list.map((t) => t.username).filter(Boolean).sort();
+  const trackSelf = raw.settings?.trackSelf !== false;
+  const wanted = [...list.map(targetKey).filter((k): k is string => !!k), ...(trackSelf ? ["me"] : [])].sort();
   const synced = [...(raw.lastSync?.usernames ?? [])].sort();
   return {
     list,
@@ -127,6 +147,7 @@ export async function loadTargets(): Promise<Targets> {
     ciSession: raw.ciSession ?? null,
     lastSync: raw.lastSync ?? null,
     needsSync: JSON.stringify(wanted) !== JSON.stringify(synced),
+    trackSelf,
   };
 }
 

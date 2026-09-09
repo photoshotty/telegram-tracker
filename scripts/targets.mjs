@@ -1,13 +1,14 @@
 // Manage the private list of tracked people (targets.local.json, gitignored).
 //
-//   npm run targets -- keygen                 # print a fresh TG_DATA_KEY
-//   npm run targets -- add @username [--name "Display name"] [--note "text"]
-//   npm run targets -- remove @username
+//   npm run targets -- keygen                          # print a fresh TG_DATA_KEY
+//   npm run targets -- add @username [--name X] [--note Y]
+//   npm run targets -- add --id 123456789 [--name X] [--note Y]   # someone without a username (must be in your chats/contacts)
+//   npm run targets -- remove @username | --id 123456789
 //   npm run targets -- list
-//   npm run targets -- sync                   # push usernames + data key to GitHub secrets
+//   npm run targets -- sync                            # push the list + data key to GitHub secrets
 //
-// No Telegram login is needed here: the GitHub Action looks the username up on its next run
-// and publishes the encrypted name map the dashboard reads. Only HMAC tokens reach the repo.
+// No Telegram login is needed here: the GitHub Action looks people up on its next run and
+// publishes the encrypted name map the dashboard reads. Only HMAC tokens reach the repo.
 import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -48,6 +49,9 @@ const norm = (u) =>
     .replace(/^@/, "")
     .toLowerCase();
 
+// What the collector receives: "@username" entries and "id:<n>" entries.
+export const targetKey = (t) => (t.username ? t.username : t.id ? `id:${t.id}` : null);
+
 // Secrets go to gh over stdin, never on the command line where other processes could read them.
 function setSecret(name, value) {
   execFileSync("gh", ["secret", "set", name, "-R", REPO], { input: value, stdio: ["pipe", "inherit", "inherit"], env: GH_ENV });
@@ -61,46 +65,61 @@ try {
     console.log("Add this to .env (and keep it forever; changing it renames every data folder):\n");
     console.log("TG_DATA_KEY=" + generateKey());
   } else if (cmd === "add") {
-    const username = norm(process.argv[3]);
-    if (!/^[a-z0-9_]{4,32}$/.test(username)) {
-      console.error("usage: npm run targets -- add @username [--name ...] [--note ...]  (4-32 letters, digits or _)");
+    const id = arg("--id")?.trim();
+    const username = id ? "" : norm(process.argv[3]);
+    if (id && !/^\d{3,20}$/.test(id)) {
+      console.error("--id must be a numeric Telegram user id");
+      process.exit(1);
+    }
+    if (!id && !/^[a-z0-9_]{4,32}$/.test(username)) {
+      console.error("usage: npm run targets -- add @username | --id <numeric id>  [--name ...] [--note ...]");
       process.exit(1);
     }
     const added = await mutate((db) => {
-      if (db.targets.some((t) => t.username === username)) return false;
-      db.targets.push({ username, name: arg("--name")?.trim() ?? "", note: arg("--note")?.trim() ?? "", addedAt: new Date().toISOString() });
+      if (db.targets.some((t) => (username && t.username === username) || (id && String(t.id) === id))) return false;
+      db.targets.push({ ...(id ? { id } : { username }), name: arg("--name")?.trim() ?? "", note: arg("--note")?.trim() ?? "", addedAt: new Date().toISOString() });
       return true;
     });
-    console.log(added ? `added @${username}; the next GitHub poll looks them up` : `@${username} is already in the list`);
+    const label = id ? `id ${id}` : `@${username}`;
+    console.log(added ? `added ${label}; the next GitHub poll looks them up` : `${label} is already in the list`);
   } else if (cmd === "remove") {
-    const username = norm(process.argv[3]);
+    const id = arg("--id")?.trim();
+    const username = id ? "" : norm(process.argv[3]);
     const removed = await mutate((db) => {
       const before = db.targets.length;
-      db.targets = db.targets.filter((t) => t.username !== username);
+      db.targets = db.targets.filter((t) => !((username && t.username === username) || (id && String(t.id) === id)));
       return before !== db.targets.length;
     });
-    console.log(removed ? `removed @${username}` : `@${username} not found`);
+    console.log(removed ? `removed ${id ? "id " + id : "@" + username}` : "not found");
   } else if (cmd === "list") {
     const db = await load();
     if (db.targets.length === 0) console.log("no targets yet; add one with: npm run targets -- add @username");
     for (const t of db.targets) {
-      const token = t.id && key ? tokenFor(key, t.id) : "(looked up by CI)";
-      console.log(`${token}\t${t.username ? "@" + t.username : "-"}\t${t.name || ""}${t.note ? `\t(${t.note})` : ""}`);
+      const token = t.id && key ? tokenFor(key, String(t.id)) : "(looked up by CI)";
+      console.log(`${token}\t${targetKey(t) ?? "-"}\t${t.name || ""}${t.note ? `\t(${t.note})` : ""}`);
     }
+  } else if (cmd === "self") {
+    const on = process.argv[3] !== "off";
+    await mutate((db) => {
+      db.settings = { ...(db.settings ?? {}), trackSelf: on };
+    });
+    console.log(on ? "the polling account itself will be tracked" : "the polling account itself will not be tracked");
   } else if (cmd === "sync") {
     if (!key) {
       console.error("TG_DATA_KEY missing in .env; run `npm run targets -- keygen` first");
       process.exit(1);
     }
-    const usernames = (await load()).targets.map((t) => t.username).filter(Boolean);
-    setSecret("TG_TARGETS", JSON.stringify(usernames));
+    const db = await load();
+    const keys = db.targets.map(targetKey).filter(Boolean);
+    if (db.settings?.trackSelf !== false) keys.push("me");
+    setSecret("TG_TARGETS", JSON.stringify(keys));
     setSecret("TG_DATA_KEY", key);
     await mutate((db) => {
-      db.lastSync = { at: new Date().toISOString(), usernames };
+      db.lastSync = { at: new Date().toISOString(), usernames: keys };
     });
-    console.log(`synced ${usernames.length} username(s) and the data key to ${REPO}`);
+    console.log(`synced ${keys.length} target(s) and the data key to ${REPO}`);
   } else {
-    console.log("commands: keygen | add @username | remove @username | list | sync");
+    console.log("commands: keygen | add @username | add --id N | remove @username | remove --id N | list | self on|off | sync");
     process.exit(1);
   }
 } catch (e) {

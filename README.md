@@ -12,7 +12,8 @@ Everything else is a button in the dashboard. No Telegram login on this PC.
 
 | Button | What it does |
 |---|---|
-| **Add** (People panel) | Saves the @username here and pushes the list to a GitHub secret. GitHub looks the person up on its next poll and publishes an encrypted name map only your key can read. |
+| **Add** (People panel) | By @username, or **found by GitHub** for people without a username: from your main account, forward any message from them (or share their contact card) to the polling account, press Poll now, then pick them. Saves them here, pushes the list to a GitHub secret; GitHub looks the person up on its next poll and publishes an encrypted name map only your key can read. |
+| **also track the polling account itself** | Untick when a separate account does the polling. |
 | trash icon | Stops tracking someone (their data stays). |
 | **Sync** | Re-pushes the username list and data key to GitHub secrets. |
 | **Poll now** | Triggers the GitHub Action, waits for it, and pulls the new samples. |

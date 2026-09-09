@@ -3,7 +3,7 @@ import { ChevronRight, Radar } from "lucide-react";
 import { LoginPanel } from "@/components/login-panel";
 import { PeoplePanel, type PersonRow } from "@/components/people-panel";
 import { Badge, Card, CardBody, CardHeader, EmptyState, LiveDot } from "@/components/ui";
-import { displayName, listTokens, loadSamples, loadTargets, serverTimezone, sha256, tokenFor } from "@/lib/data";
+import { displayName, listDialogsSafe, listTokens, loadSamples, loadTargets, serverTimezone, sha256, tokenFor } from "@/lib/data";
 import { lastPullError, maybePull } from "@/lib/ops";
 import { computeStats, deriveSessions, todaySummary } from "@/lib/sessions";
 import { formatDuration, formatTimeAgo } from "@/lib/time";
@@ -16,6 +16,7 @@ export default async function HomePage() {
   const targets = await loadTargets();
   const tz = targets.timezone ?? serverTimezone();
   const tokens = await listTokens();
+  const dialogs = await listDialogsSafe();
   const nowSec = Math.floor(Date.now() / 1000);
 
   const rows = await Promise.all(
@@ -39,7 +40,7 @@ export default async function HomePage() {
       : undefined;
     const token = entry?.[0] ?? (t.id ? tokenFor(t.id) : null);
     if (token) seenTokens.add(token);
-    const failure = t.username ? targets.map?.failed[sha256(t.username)] : undefined;
+    const failure = targets.map?.failed[t.username ? sha256(t.username) : sha256(`id:${t.id}`)];
     people.push({
       username: t.username,
       name: t.name?.trim() || entry?.[1].name || (t.username ? `@${t.username}` : `User ${t.id}`),
@@ -93,7 +94,14 @@ export default async function HomePage() {
 
       <LoginPanel session={targets.ciSession} hasApiKeys={targets.hasApiKeys} />
 
-      <PeoplePanel people={people} needsSync={targets.needsSync} lastSyncAt={targets.lastSync?.at ?? null} />
+      <PeoplePanel
+        people={people}
+        found={dialogs?.users ?? []}
+        foundUpdatedAt={dialogs?.updatedAt ?? null}
+        trackSelf={targets.trackSelf}
+        needsSync={targets.needsSync}
+        lastSyncAt={targets.lastSync?.at ?? null}
+      />
 
       <Card>
         <CardHeader className="flex items-center gap-2">
