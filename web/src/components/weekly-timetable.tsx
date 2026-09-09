@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, Clock } from "lucide-react";
 import type { Gap, Session } from "@/lib/types";
-import { Button, Card, CardBody, CardHeader, IconButton, LiveDot, cn } from "./ui";
+import { Button, Card, CardBody, IconButton, LiveDot, SectionHeader, cn } from "./ui";
 import {
   BODY_PX,
   DAY_START_HOUR,
@@ -160,33 +160,30 @@ export function WeeklyTimetable({
 
   return (
     <Card>
-      <CardHeader className="flex flex-wrap items-center gap-3">
-        <CalendarDays className="h-4 w-4 text-neutral-500" />
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-300">Weekly schedule</h2>
-        <div className="ml-1 hidden text-xs text-neutral-500 sm:block">
-          {totalThisWeek.count} session{totalThisWeek.count === 1 ? "" : "s"}
-          {totalThisWeek.sec > 0 ? ` · ${formatDuration(totalThisWeek.sec)}` : ""}
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          <IconButton onClick={() => setWeekOffset((v) => v - 1)} aria-label="Previous week">
+      <SectionHeader
+        icon={<CalendarDays className="h-4 w-4" />}
+        title="Weekly schedule"
+        hint={`${totalThisWeek.count} session${totalThisWeek.count === 1 ? "" : "s"}${totalThisWeek.sec > 0 ? ` · ${formatDuration(totalThisWeek.sec)}` : ""}`}
+      >
+        <div className="flex items-center gap-1">
+          <IconButton variant="ghost" size="sm" onClick={() => setWeekOffset((v) => v - 1)} aria-label="Previous week">
             <ChevronLeft className="h-4 w-4" />
           </IconButton>
-          <div className="min-w-[12rem] text-center text-sm font-medium tabular-nums text-neutral-200">
-            {rangeLabel(week.keys)}
-          </div>
+          <div className="min-w-48 text-center text-sm font-medium tabular-nums text-neutral-200">{rangeLabel(week.keys)}</div>
           <IconButton
+            variant="ghost"
+            size="sm"
             onClick={() => setWeekOffset((v) => Math.min(0, v + 1))}
             aria-label="Next week"
             disabled={isCurrentWeek}
-            className={isCurrentWeek ? "opacity-30" : ""}
           >
             <ChevronRight className="h-4 w-4" />
           </IconButton>
-          <Button onClick={() => setWeekOffset(0)} disabled={isCurrentWeek} className={isCurrentWeek ? "opacity-50" : ""}>
-            Today
-          </Button>
         </div>
-      </CardHeader>
+        <Button size="sm" onClick={() => setWeekOffset(0)} disabled={isCurrentWeek}>
+          Today
+        </Button>
+      </SectionHeader>
       <CardBody className="p-3 sm:p-4">
         <div className="grid" style={{ gridTemplateColumns: "3.25rem minmax(0, 1fr)" }}>
           <div />
@@ -244,7 +241,7 @@ export function WeeklyTimetable({
             })}
           </div>
         </div>
-        <div className="mt-2 flex flex-wrap items-center gap-4 text-[11px] text-neutral-500">
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] text-neutral-500">
           <span className="inline-flex items-center gap-1.5">
             <span className="inline-block h-2.5 w-4 rounded-sm border border-sky-400/60 bg-sky-400/25" /> online
           </span>

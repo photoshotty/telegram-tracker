@@ -13,11 +13,29 @@ export function HeaderActions() {
   return (
     <div className="flex items-center gap-2">
       {msg ? (
-        <span className="hidden max-w-[22rem] truncate text-xs text-neutral-500 sm:block" title={msg}>
+        <span
+          className="hidden max-w-[20rem] truncate rounded-md bg-neutral-900 px-2 py-1 text-xs text-neutral-500 md:block"
+          title={msg}
+        >
           {msg}
         </span>
       ) : null}
       <Button
+        variant="ghost"
+        disabled={busy}
+        title="git pull the samples the GitHub Action committed"
+        onClick={() =>
+          startPull(async () => {
+            const r = await pullLatest();
+            setMsg(r.ok ? r.output : `git pull failed: ${r.output}`);
+          })
+        }
+      >
+        <RefreshCw className={cn("h-3.5 w-3.5", pulling && "animate-spin")} />
+        <span className="hidden sm:inline">{pulling ? "Pulling…" : "Refresh"}</span>
+      </Button>
+      <Button
+        variant="primary"
         disabled={busy}
         title="Trigger the GitHub Action now, wait for it, then pull the result"
         onClick={() =>
@@ -30,19 +48,6 @@ export function HeaderActions() {
       >
         <Play className={cn("h-3.5 w-3.5", polling && "animate-pulse")} />
         {polling ? "Polling…" : "Poll now"}
-      </Button>
-      <Button
-        disabled={busy}
-        title="git pull the samples the GitHub Action committed"
-        onClick={() =>
-          startPull(async () => {
-            const r = await pullLatest();
-            setMsg(r.ok ? r.output : `git pull failed: ${r.output}`);
-          })
-        }
-      >
-        <RefreshCw className={cn("h-3.5 w-3.5", pulling && "animate-spin")} />
-        {pulling ? "Pulling…" : "Pull latest"}
       </Button>
     </div>
   );

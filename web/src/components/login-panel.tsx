@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { KeyRound, QrCode, ShieldCheck, X } from "lucide-react";
 import { cancelLogin, finishLogin, getLoginState, startLogin, submitLoginPassword } from "@/app/actions";
 import type { LoginState } from "@/lib/ops";
-import { Button, Card, CardBody, CardHeader } from "./ui";
+import { Button, Card, CardBody, Dot, SectionHeader, TextButton, inputClass } from "./ui";
 
 // Creates or renews the Telegram session that GitHub Actions polls with. Nothing is stored on this PC.
 export function LoginPanel({
@@ -50,71 +50,68 @@ export function LoginPanel({
       setState(await startLogin());
     });
 
+  // Collapsed: a quiet one-line footer, since renewing is a once-in-a-while chore.
   if (!state) {
     return (
-      <div className="mb-6 flex flex-wrap items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900/40 px-4 py-2 text-xs text-neutral-500">
-        <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-2 px-1 text-xs text-neutral-600">
+        <ShieldCheck className="h-3.5 w-3.5 text-emerald-500/80" />
         <span>
-          GitHub session:{" "}
+          Telegram session for GitHub:{" "}
           {session ? (
             <>
-              <span className="text-neutral-300">{session.name || "set"}</span>
+              <span className="text-neutral-400">{session.name || "set"}</span>
               {session.username ? <span> @{session.username}</span> : null}
               <span> · renewed {new Date(session.at).toLocaleDateString()}</span>
             </>
           ) : (
-            <span className="text-neutral-300">configured</span>
+            <span className="text-neutral-400">configured</span>
           )}
         </span>
-        <button
-          type="button"
+        <TextButton
           onClick={begin}
           disabled={pending || !hasApiKeys}
           title="Only needed if Telegram ever revokes the session GitHub uses"
-          className="ml-auto text-neutral-500 underline-offset-2 hover:text-neutral-300 hover:underline disabled:opacity-50"
+          className="ml-auto"
         >
-          renew via QR
-        </button>
+          Renew via QR
+        </TextButton>
       </div>
     );
   }
 
   return (
-    <Card className="mb-6">
-      <CardHeader className="flex items-center gap-2">
-        <QrCode className="h-4 w-4 text-neutral-500" />
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-300">Renew GitHub session</h2>
-        <span className="ml-1 text-xs text-neutral-500">the new session goes straight into the GitHub secret; nothing is kept on this PC</span>
-        {active ? (
-          <button
-            type="button"
-            className="ml-auto text-neutral-500 hover:text-neutral-200"
-            onClick={() => start(async () => setState(await cancelLogin()))}
-            aria-label="Cancel"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        ) : (
-          <button type="button" className="ml-auto text-neutral-500 hover:text-neutral-200" onClick={() => setState(null)} aria-label="Close">
-            <X className="h-4 w-4" />
-          </button>
-        )}
-      </CardHeader>
+    <Card className="panel-in">
+      <SectionHeader
+        icon={<QrCode className="h-4 w-4" />}
+        title="Renew GitHub session"
+        hint="the new session goes straight into the GitHub secret; nothing is kept on this PC"
+      >
+        <button
+          type="button"
+          className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-neutral-800/60 hover:text-neutral-200"
+          onClick={active ? () => start(async () => setState(await cancelLogin())) : () => setState(null)}
+          aria-label={active ? "Cancel" : "Close"}
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </SectionHeader>
       <CardBody>
         {state.phase === "idle" ? (
           <div className="flex flex-wrap items-center gap-3">
             <p className="text-sm text-neutral-400">Scan a QR code with your phone to create a fresh session for GitHub Actions.</p>
-            <Button onClick={begin} disabled={pending} className="ml-auto">
+            <Button variant="primary" onClick={begin} disabled={pending} className="ml-auto">
               <QrCode className="h-3.5 w-3.5" /> Show QR code
             </Button>
           </div>
         ) : state.phase === "starting" ? (
-          <div className="text-sm text-neutral-400">Talking to Telegram…</div>
+          <div className="inline-flex items-center gap-2 text-sm text-neutral-400">
+            <Dot className="animate-pulse bg-sky-400" /> Talking to Telegram…
+          </div>
         ) : state.phase === "qr" ? (
-          <div className="flex flex-col items-start gap-4 sm:flex-row">
+          <div className="flex flex-col items-start gap-5 sm:flex-row">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={state.qrDataUrl} alt="Telegram login QR code" className="h-[280px] w-[280px] rounded-lg bg-white p-2" />
-            <ol className="list-decimal space-y-1.5 pl-5 text-sm text-neutral-300">
+            <img src={state.qrDataUrl} alt="Telegram login QR code" className="h-64 w-64 rounded-xl bg-white p-2.5" />
+            <ol className="list-decimal space-y-2 pl-5 text-sm text-neutral-300 marker:text-neutral-600">
               <li>Open Telegram on your phone</li>
               <li>
                 Settings → Devices → <span className="text-neutral-100">Link Desktop Device</span>
@@ -133,14 +130,8 @@ export function LoginPanel({
           >
             <KeyRound className="h-4 w-4 text-neutral-500" />
             <span className="text-sm text-neutral-300">Two-step password{state.hint ? ` (hint: ${state.hint})` : ""}</span>
-            <input
-              type="password"
-              autoFocus
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="h-8 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-sm text-neutral-100 outline-none focus:border-neutral-600"
-            />
-            <Button type="submit" disabled={pending || !password}>
+            <input type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} className={`${inputClass} w-56`} />
+            <Button type="submit" variant="primary" disabled={pending || !password}>
               Continue
             </Button>
             {state.error ? <span className="text-xs text-red-300">{state.error}</span> : null}

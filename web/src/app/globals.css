@@ -9,16 +9,54 @@
   color-scheme: dark;
 }
 
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
 body {
   background: #0a0a0a;
-  color: #ededed;
+  color: #e5e5e5;
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(56, 189, 248, 0.25);
+}
+
+/* Thin, unobtrusive scrollbars so overflow areas do not add visual weight. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #303030 transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #303030;
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 @keyframes live-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
 }
 .live-dot {
-  animation: live-pulse 1.6s ease-in-out infinite;
+  animation: live-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.panel-in {
+  animation: panel-in 0.16s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot, .panel-in { animation: none; }
 }

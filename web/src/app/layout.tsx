@@ -16,11 +16,16 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
-      <body className="min-h-full flex flex-col bg-neutral-950 text-neutral-100">
-        <header className="sticky top-0 z-50 border-b border-neutral-800 bg-neutral-950/80 backdrop-blur">
-          <div className="mx-auto flex h-14 max-w-6xl items-center gap-4 px-4">
-            <Link href="/" className="inline-flex items-center gap-2 text-sm font-semibold tracking-tight">
-              <Radar className="h-4 w-4 text-sky-400" />
+      <body className="min-h-full bg-neutral-950 text-neutral-100">
+        <header className="sticky top-0 z-50 border-b border-neutral-800/60 bg-neutral-950/85 backdrop-blur-md">
+          <div className="mx-auto flex h-14 max-w-6xl items-center gap-4 px-4 sm:px-6">
+            <Link
+              href="/"
+              className="inline-flex items-center gap-2.5 rounded-lg text-sm font-semibold tracking-tight text-neutral-100 outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40"
+            >
+              <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-sky-500/25 bg-sky-500/10">
+                <Radar className="h-4 w-4 text-sky-400" />
+              </span>
               Telegram Tracker
             </Link>
             <div className="ml-auto">
@@ -28,7 +33,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             </div>
           </div>
         </header>
-        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">{children}</main>
+        <main className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6 sm:py-10">{children}</main>
       </body>
     </html>
   );

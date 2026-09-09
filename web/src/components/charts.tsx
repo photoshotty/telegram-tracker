@@ -3,7 +3,7 @@
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { DayRow } from "@/lib/sessions";
 import { formatHourLabel } from "@/lib/time";
-import { ACCENT } from "./ui";
+import { ACCENT, ACCENT_ALT } from "./ui";
 
 function TooltipBox({
   active,
@@ -18,7 +18,7 @@ function TooltipBox({
 }) {
   if (!active || !payload || payload.length === 0) return null;
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-950/95 px-3 py-2 text-xs shadow-xl backdrop-blur">
+    <div className="rounded-xl border border-neutral-800 bg-neutral-950/95 px-3 py-2 text-xs shadow-2xl shadow-black/50 backdrop-blur">
       <div className="mb-1 font-medium text-neutral-300">{String(label)}</div>
       {payload.map((p, i) => (
         <div key={i} className="flex items-center gap-2 tabular-nums">
@@ -31,7 +31,7 @@ function TooltipBox({
   );
 }
 
-const axisStyle = { fontSize: 10, fill: "#737373" };
+const axisStyle = { fontSize: 10, fill: "#6b6b6b" };
 
 export function HourlyChart({ profile }: { profile: number[] }) {
   const data = profile.map((minutes, h) => ({ hour: h, label: formatHourLabel(h), minutes: Math.round(minutes * 10) / 10 }));
@@ -75,7 +75,7 @@ export function DailyChart({ rows }: { rows: DayRow[] }) {
             )}
           />
           <Bar yAxisId="left" dataKey="sessions" name="sessions" fill={ACCENT} radius={[3, 3, 0, 0]} />
-          <Bar yAxisId="right" dataKey="minutes" name="minutes online" fill="#a3a3a3" radius={[3, 3, 0, 0]} />
+          <Bar yAxisId="right" dataKey="minutes" name="minutes online" fill={ACCENT_ALT} radius={[3, 3, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
     </div>
