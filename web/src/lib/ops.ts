@@ -7,13 +7,13 @@ import { ROOT } from "./data";
 
 export type RunResult = { ok: boolean; code: number | null; stdout: string; stderr: string };
 
-export function run(cmd: string, args: string[], opts: { timeoutMs?: number } = {}): Promise<RunResult> {
+export function run(cmd: string, args: string[], opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): Promise<RunResult> {
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let child: ChildProcess;
     try {
-      child = spawn(cmd, args, { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      child = spawn(cmd, args, { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: opts.env ?? process.env });
     } catch (e) {
       resolve({ ok: false, code: null, stdout, stderr: (e as Error).message });
       return;
@@ -36,8 +36,23 @@ export function run(cmd: string, args: string[], opts: { timeoutMs?: number } = 
   });
 }
 
-export const runNode = (script: string, args: string[] = [], opts: { timeoutMs?: number } = {}) =>
-  run(process.execPath, ["--env-file-if-exists=.env", script, ...args], opts);
+export const runNode = async (script: string, args: string[] = [], opts: { timeoutMs?: number } = {}) =>
+  run(process.execPath, ["--env-file-if-exists=.env", script, ...args], { ...opts, env: await ghEnv() });
+
+// This machine has several GitHub CLI accounts; always act as the repo owner, not the "active" one.
+async function ghEnv(): Promise<NodeJS.ProcessEnv> {
+  if (g.__tgGhEnv) return g.__tgGhEnv;
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (!env.GH_TOKEN) {
+    const owner = (await repoSlug()).split("/")[0];
+    const r = await run("gh", ["auth", "token", "--user", owner], { timeoutMs: 15_000 });
+    if (r.ok && r.stdout.trim()) env.GH_TOKEN = r.stdout.trim();
+  }
+  g.__tgGhEnv = env;
+  return env;
+}
+
+const runGh = async (args: string[], opts: { timeoutMs?: number } = {}) => run("gh", args, { ...opts, env: await ghEnv() });
 
 // Strip the library's coloured INFO banner and blank lines, keep what a human wants to read.
 export function tidy(r: RunResult): string {
@@ -55,6 +70,7 @@ const g = globalThis as unknown as {
   __tgLastPull?: number;
   __tgLastPullError?: string | null;
   __tgRepo?: string;
+  __tgGhEnv?: NodeJS.ProcessEnv;
   __tgLogin?: { state: LoginState; child: ChildProcess | null; lastStderr: string };
 };
 
@@ -109,7 +125,7 @@ export async function maybePull(minIntervalMs = 60_000): Promise<void> {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function newestRun(slug: string): Promise<{ id: number; status: string; conclusion: string } | null> {
-  const r = await run("gh", ["run", "list", "-R", slug, "-w", "poll.yml", "-L", "1", "--json", "databaseId,status,conclusion"], { timeoutMs: 30_000 });
+  const r = await runGh(["run", "list", "-R", slug, "-w", "poll.yml", "-L", "1", "--json", "databaseId,status,conclusion"], { timeoutMs: 30_000 });
   try {
     const arr = JSON.parse(r.stdout) as Array<{ databaseId: number; status: string; conclusion: string }>;
     return arr[0] ? { id: arr[0].databaseId, status: arr[0].status, conclusion: arr[0].conclusion } : null;
@@ -122,7 +138,7 @@ async function newestRun(slug: string): Promise<{ id: number; status: string; co
 export async function pollNow(): Promise<{ ok: boolean; output: string }> {
   const slug = await repoSlug();
   const before = await newestRun(slug);
-  const dispatch = await run("gh", ["workflow", "run", "poll.yml", "-R", slug], { timeoutMs: 30_000 });
+  const dispatch = await runGh(["workflow", "run", "poll.yml", "-R", slug], { timeoutMs: 30_000 });
   if (!dispatch.ok) return { ok: false, output: tidy(dispatch) || "could not start the workflow (is the GitHub CLI logged in?)" };
   const deadline = Date.now() + 150_000;
   let seen = false;
@@ -205,6 +221,7 @@ export async function startLogin(): Promise<LoginState> {
       cwd: ROOT,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      env: await ghEnv(),
     });
   } catch (e) {
     m.state = { phase: "error", error: (e as Error).message, updatedAt: Date.now() };

@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { TelegramClient } from "teleproto";
 import { StringSession } from "teleproto/sessions/index.js";
+import { ghEnvFor } from "./gh.mjs";
 
 const emit = (o) => process.stdout.write(JSON.stringify(o) + "\n");
 
@@ -90,7 +91,7 @@ try {
     username: user.username ? String(user.username).toLowerCase() : null,
   };
   const session = client.session.save();
-  execFileSync("gh", ["secret", "set", "TG_SESSION", "-R", repo], { input: session, stdio: ["pipe", "ignore", "pipe"] });
+  execFileSync("gh", ["secret", "set", "TG_SESSION", "-R", repo], { input: session, stdio: ["pipe", "ignore", "pipe"], env: ghEnvFor(repo) });
   await rememberCiSession(info);
   emit({ type: "done", ...info });
 } catch (e) {

@@ -12,9 +12,11 @@ import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { generateKey, tokenFor } from "../src/crypto.mjs";
+import { ghEnvFor } from "../src/gh.mjs";
 
 const FILE = path.resolve("targets.local.json");
 const REPO = process.env.GH_REPO ?? "photoshotty/telegram-tracker";
+const GH_ENV = ghEnvFor(REPO);
 
 async function load() {
   try {
@@ -48,7 +50,7 @@ const norm = (u) =>
 
 // Secrets go to gh over stdin, never on the command line where other processes could read them.
 function setSecret(name, value) {
-  execFileSync("gh", ["secret", "set", name, "-R", REPO], { input: value, stdio: ["pipe", "inherit", "inherit"] });
+  execFileSync("gh", ["secret", "set", name, "-R", REPO], { input: value, stdio: ["pipe", "inherit", "inherit"], env: GH_ENV });
 }
 
 const cmd = process.argv[2];
