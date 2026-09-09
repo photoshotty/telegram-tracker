@@ -112,7 +112,7 @@ const summarize = (u) => ({
   name: [u.firstName, u.lastName].filter(Boolean).join(" "),
   username: u.username ? String(u.username).toLowerCase() : null,
 });
-const usable = (u) => u?.className === "User" && !u.self && !u.bot && !u.deleted;
+const usable = (u) => u?.className === "User" && !u.self && !u.bot && !u.deleted && !u.support && u.id.toString() !== "777000";
 
 // Everyone the polling account can currently reference, keyed by id:
 //   contacts and recent chats (full users), forwarded senders (with the message they were seen in),
