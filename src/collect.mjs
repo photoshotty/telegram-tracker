@@ -206,10 +206,45 @@ async function fetchFullUser(client, cand) {
   return null;
 }
 
+// Hashes from a bare username lookup can stop working for people the polling account has no
+// relationship with. Adding them as a contact (silent for them) makes the reference durable:
+// contacts.getContacts then returns a valid hash on every run.
+async function ensureContact(client, entry, name) {
+  if (entry.contact) return;
+  try {
+    await client.invoke(
+      new Api.contacts.AddContact({
+        id: new Api.InputUser({ userId: bigInt(entry.id), accessHash: bigInt(entry.hash) }),
+        firstName: name || "tracked",
+        lastName: "",
+        phone: "",
+        addPhonePrivacyException: false,
+      }),
+    );
+    entry.contact = true;
+    console.log(`added ${tokenFor(DATA_KEY, entry.id)} to the polling account's contacts`);
+  } catch (e) {
+    console.error(`could not add a target to contacts: ${errMsg(e)}`);
+  }
+}
+
 async function resolveMissing(client, cache, { usernames, ids }) {
   let changed = false;
   const { cands, list } = await discover(client);
   await saveEncrypted(DIALOGS_FILE, { updatedAt: Math.floor(Date.now() / 1000), users: list });
+
+  // Contacts and chats carry authoritative hashes: refresh cached entries from them every run.
+  for (const e of Object.values(cache.entries)) {
+    const c = e?.id ? cands.get(e.id) : null;
+    if (c?.hash && c.hash !== e.hash) {
+      e.hash = c.hash;
+      changed = true;
+    }
+    if (e?.hash && c?.source === "contact" && !e.contact) {
+      e.contact = true;
+      changed = true;
+    }
+  }
 
   for (const id of ids) {
     const e = cache.entries[idKey(id)];
@@ -221,8 +256,9 @@ async function resolveMissing(client, cache, { usernames, ids }) {
       if (u) hash = u.accessHash.toString();
     }
     if (hash) {
-      cache.entries[idKey(id)] = { id, hash };
+      cache.entries[idKey(id)] = { id, hash, contact: cand?.source === "contact" };
       console.log(`resolved an id target -> ${tokenFor(DATA_KEY, id)}`);
+      await ensureContact(client, cache.entries[idKey(id)], cand?.name);
     } else {
       cache.entries[idKey(id)] = { failed: cand ? "seen but not reachable (their privacy hides forwards / phone)" : "not among contacts, chats, forwards or contact cards", at: Date.now() };
       console.error("an id target could not be resolved; will retry in 24h");
@@ -242,9 +278,10 @@ async function resolveMissing(client, cache, { usernames, ids }) {
         const res = await client.invoke(new Api.contacts.ResolveUsername({ username: u }));
         const user = res.users.find((x) => x.className === "User");
         if (!user) throw new Error("not a user");
-        cache.entries[key] = { id: user.id.toString(), hash: user.accessHash.toString() };
+        cache.entries[key] = { id: user.id.toString(), hash: user.accessHash.toString(), contact: !!user.contact };
         changed = true;
         console.log(`resolved target #${i} -> ${tokenFor(DATA_KEY, user.id.toString())}`);
+        await ensureContact(client, cache.entries[key], summarize(user).name);
       } catch (err) {
         const msg = errMsg(err);
         if (msg.startsWith("FLOOD_WAIT")) {
@@ -323,6 +360,21 @@ async function main() {
     } catch (err) {
       console.error(`users.getUsers failed for the target list (${errMsg(err)}); polling self only this run`);
       users = await client.invoke(new Api.users.GetUsers({ id: [new Api.InputUserSelf()] }));
+    }
+
+    // Telegram answers userEmpty for a hash it no longer accepts: forget it so the next run re-resolves.
+    const returned = new Set(users.filter((u) => u.className === "User").map((u) => u.id.toString()));
+    const requested = new Set(entries.filter((e) => e?.hash).map((e) => e.id));
+    let dropped = 0;
+    for (const [key, e] of Object.entries(cache.entries)) {
+      if (e?.hash && requested.has(e.id) && !returned.has(e.id)) {
+        delete cache.entries[key];
+        dropped += 1;
+      }
+    }
+    if (dropped) {
+      console.error(`${dropped} target(s) came back empty from Telegram (stale access hash); they will be looked up again next run`);
+      await saveEncrypted(CACHE_FILE, cache);
     }
 
     const t = Math.floor(Date.now() / 1000);
