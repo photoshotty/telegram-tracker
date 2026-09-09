@@ -157,7 +157,12 @@ async function discover(client) {
           const u = byId.get(id);
           if (u?.self) continue;
           const existing = cands.get(id);
-          if (!existing?.hash) put(id, { name: u ? summarize(u).name : existing?.name ?? m.fwdFrom.fromName ?? "", username: u?.username?.toLowerCase() ?? existing?.username ?? null, source: existing?.source ?? "forward", via: existing?.via ?? { peer, msgId: m.id } });
+          put(id, {
+            name: existing?.name || (u ? summarize(u).name : m.fwdFrom.fromName ?? ""),
+            username: existing?.username ?? u?.username?.toLowerCase() ?? null,
+            source: "forward", // label wins even for people who are also a chat or contact
+            via: existing?.via ?? { peer, msgId: m.id },
+          });
         }
         const media = m.media;
         if (media?.className === "MessageMediaContact" && media.phoneNumber) {
