@@ -293,3 +293,4 @@
 {"t":1789075519,"s":"online","wo":null,"ex":1789075720,"src":"poll"}
 {"t":1789075823,"s":"online","wo":null,"ex":1789076011,"src":"poll"}
 {"t":1789076120,"s":"online","wo":null,"ex":1789076219,"src":"poll"}
+{"t":1789076420,"s":"offline","wo":1789076219,"ex":null,"src":"poll"}
