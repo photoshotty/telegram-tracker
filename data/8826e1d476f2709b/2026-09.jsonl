@@ -1430,3 +1430,4 @@
 {"t":1789410918,"s":"online","wo":null,"ex":1789411100,"src":"poll"}
 {"t":1789411263,"s":"online","wo":null,"ex":1789411498,"src":"poll"}
 {"t":1789411554,"s":"offline","wo":1789411498,"ex":null,"src":"poll"}
+{"t":1789411820,"s":"offline","wo":1789411498,"ex":null,"src":"poll"}
