@@ -2279,3 +2279,4 @@
 {"t":1789664425,"s":"online","wo":null,"ex":1789664702,"src":"poll"}
 {"t":1789664716,"s":"online","wo":null,"ex":1789664945,"src":"poll"}
 {"t":1789665022,"s":"online","wo":null,"ex":1789665237,"src":"poll"}
+{"t":1789665320,"s":"offline","wo":1789665237,"ex":null,"src":"poll"}
