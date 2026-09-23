@@ -3856,3 +3856,4 @@
 {"t":1790127921,"s":"online","wo":null,"ex":1790128161,"src":"poll"}
 {"t":1790128220,"s":"online","wo":null,"ex":1790128385,"src":"poll"}
 {"t":1790128517,"s":"online","wo":null,"ex":1790128789,"src":"poll"}
+{"t":1790128826,"s":"offline","wo":1790128815,"ex":null,"src":"poll"}
