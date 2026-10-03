@@ -620,3 +620,4 @@
 {"t":1790995519,"s":"online","wo":null,"ex":1790995721,"src":"poll"}
 {"t":1790995820,"s":"online","wo":null,"ex":1790995992,"src":"poll"}
 {"t":1790996118,"s":"online","wo":null,"ex":1790996322,"src":"poll"}
+{"t":1790996423,"s":"offline","wo":1790996322,"ex":null,"src":"poll"}
