@@ -606,3 +606,4 @@
 {"t":1790991624,"s":"offline","wo":1790990775,"ex":null,"src":"poll"}
 {"t":1790991920,"s":"online","wo":null,"ex":1790991968,"src":"poll"}
 {"t":1790992219,"s":"online","wo":null,"ex":1790992410,"src":"poll"}
+{"t":1790992520,"s":"offline","wo":1790992410,"ex":null,"src":"poll"}
